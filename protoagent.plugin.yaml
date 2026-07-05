@@ -1,0 +1,37 @@
+id: design-system
+name: Design System
+version: 0.1.0
+description: >-
+  Matt's live window into the protoLabs.studio design system. Reads @protolabsai/design
+  tokens, the packages/ui component inventory, and the visual-identity rules STRAIGHT FROM
+  protoContent — so the current design vocabulary is never a stale copy frozen in knowledge.
+  Tools: read tokens / components / a component's story / the rules; lint code against the
+  token vocabulary (ds_check); and a recurring DRIFT WATCH that nudges the agent when the
+  design system moves (tokens change, components added/removed) so docs + consumers stay in
+  sync. Read-live-not-cache is the whole point — the design system is a live source of truth.
+
+# Per-agent opt-in (turned on via the frontend bundle's enable list); not shipped on.
+
+# Defaults — overridable per agent (ADR 0019 settings below). Point at another studio
+# repo / ref, or blank watch_cron to turn the drift watch off for this agent.
+config:
+  repo: protoLabsAI/protoContent      # owner/name the design system lives in
+  ref: main                           # git ref to read
+  tokens_path: packages/design-system/dist/tokens.json   # committed built token set (clean JSON)
+  components_path: packages/ui/src                          # Storybook component inventory
+  rules_path: docs/reference/visual-identity.md           # the when-to-use / what-we-don't-do rules
+  watch_cron: "0 14 * * *"            # daily 14:00 UTC drift check; "" = watch off
+
+# Settings (ADR 0019) — editable in the console.
+settings:
+  - {key: repo, label: "Design-system repo (owner/name)", type: string}
+  - {key: ref, label: "Git ref", type: string}
+  - {key: watch_cron, label: "Drift-watch cron (blank = off)", type: string}
+
+# Declarative transparency (shown in the console).
+capabilities:
+  network: ["api.github.com"]   # reads the repo via the GitHub contents API (token-authed for private repos)
+  filesystem: scoped            # one small drift snapshot in the instance data dir
+
+# Auth: the GitHub contents API is read with GITHUB_TOKEN / GH_TOKEN from the env (protoContent
+# is private). Same token the github plugin uses; no separate plugin secret.
