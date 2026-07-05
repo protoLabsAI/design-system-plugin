@@ -120,3 +120,26 @@ def test_fetch_error_becomes_tool_message(monkeypatch):
         raise RuntimeError("could not fetch (ConnectError)")
     monkeypatch.setattr(ds, "_gh_get_raw", _boom)
     assert "ds_tokens error" in _call(ds.ds_tokens)
+
+
+# ── design-critic subagent (v0.2.0) ───────────────────────────────────────────
+
+
+def test_design_critic_subagent_shape():
+    """The plugin builds a valid design-critic SubagentConfig grounded in the ds_* tools."""
+    import sys, types
+    # Stub graph.subagents.config so the builder imports without the full host.
+    class _SC:
+        def __init__(self, **kw): self.__dict__.update(kw)
+    mod = types.ModuleType("graph.subagents.config"); mod.SubagentConfig = _SC
+    pkg = types.ModuleType("graph.subagents"); sub = types.ModuleType("graph")
+    sys.modules.setdefault("graph", sub); sys.modules.setdefault("graph.subagents", pkg)
+    sys.modules["graph.subagents.config"] = mod
+
+    sc = ds._build_design_critic()
+    assert sc.name == "design-critic"
+    # grounded in the live-DS tools, not general vibes
+    for t in ("ds_rules", "ds_tokens", "ds_check", "ds_components", "ds_component"):
+        assert t in sc.tools
+    assert "review" in sc.description.lower() and "accessib" in sc.system_prompt.lower()
+    assert "BLOCKER" in sc.system_prompt and "verdict" in sc.system_prompt.lower()

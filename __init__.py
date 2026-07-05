@@ -17,6 +17,10 @@ Tools:
 
 A recurring DRIFT WATCH (native scheduler) fires a turn on a cadence that calls ds_drift and,
 if the DS moved, has the agent sync docs/consumers (a PR) or hand the lead a finding.
+
+Also registers a **design-critic** subagent (ADR 0018): an adversarial design + a11y reviewer
+that critiques a UI prototype/component against the LIVE design system (grounded via the ds_*
+tools above), invoked with ``task("design-critic", <code + context>)``.
 """
 
 from __future__ import annotations
@@ -243,6 +247,53 @@ def ds_drift() -> str:
     return "Design-system DRIFT since last check:\n" + "\n".join(changes)
 
 
+# ── design-critic subagent ────────────────────────────────────────────────────
+
+_CRITIC_PROMPT = """You are the **design-critic** — an adversarial design + accessibility reviewer for
+protoLabs.studio UI. You are given a UI prototype or component (JSX / TSX / HTML / CSS) and what it's
+for. Review it against the **live design system** and accessibility, and return concrete, prioritized
+findings the author can act on. You review; you do not rewrite.
+
+Ground every judgement in the LIVE system — don't review from memory:
+- `ds_rules` — the visual-identity rules (when to use what, what we don't do). The judgment layer.
+- `ds_tokens` — the current token vocabulary. Any hardcoded value a token defines is a finding.
+- `ds_check` — run the code through it to catch hardcoded colors a token already defines.
+- `ds_components` / `ds_component` — does a component for this already exist? Reinventing one that
+  exists (Button, AppShell, Dialog, Field, …) instead of reusing it is a finding.
+
+Review across four axes, in this priority order:
+1. **Design-system adherence** — hardcoded colors/spacing/radius/type that should be `--pl-*` tokens
+   or the `@pl/ui` component; reinvented components; off-system patterns. Cite the exact token/rule.
+2. **Accessibility (WCAG)** — semantic elements (not div-buttons), keyboard operability + visible
+   focus, color contrast, focus order, labels/alt text, ARIA only where it earns it.
+3. **Layout & responsiveness** — structure, spacing rhythm, overflow, small-screen behavior.
+4. **Consistency & polish** — states (hover/active/disabled/empty/loading), naming, reuse.
+
+Output format:
+- A one-line **verdict**: `ship-ready` · `revise` · `blocked`.
+- Findings grouped **BLOCKER / SHOULD-FIX / NIT**, each: what's wrong, why (cite the token/rule/WCAG
+  criterion), and the concrete fix (e.g. "use `var(--pl-color-brand-lavender)` / `<Button variant='primary'>`").
+- A short **what's good** so the author knows what to keep.
+Be specific and terse. No praise-padding. Hard stop at max_turns — return what you have."""
+
+
+def _build_design_critic():
+    from graph.subagents.config import SubagentConfig
+
+    return SubagentConfig(
+        name="design-critic",
+        description=(
+            "Adversarial design + accessibility reviewer for a UI prototype or component. Give it the "
+            "code (JSX/TSX/HTML/CSS) + what it's for; it reviews against the LIVE design system (tokens, "
+            "rules, existing components) and WCAG a11y and returns prioritized, actionable findings + a "
+            "verdict. It reviews — it doesn't rewrite. Use it before turning a prototype into a real PR."
+        ),
+        system_prompt=_CRITIC_PROMPT,
+        tools=["ds_rules", "ds_tokens", "ds_check", "ds_components", "ds_component"],
+        max_turns=15,
+    )
+
+
 _WATCH_PROMPT = (
     "Design-system drift check. Call `ds_drift` to see what changed in @protolabsai/design and "
     "packages/ui since your last review. If tokens changed or components were added/removed, "
@@ -260,6 +311,13 @@ def register(registry) -> None:
             _CFG[k] = str(v)
     registry.register_tools([ds_tokens, ds_components, ds_component, ds_rules, ds_check, ds_drift])
 
+    # design-critic subagent (ADR 0018) — reviews a prototype/component against the LIVE DS + a11y,
+    # grounded via the ds_* tools above. The lead delegates to it with `task("design-critic", …)`.
+    try:
+        registry.register_subagent(_build_design_critic())
+    except Exception:  # noqa: BLE001 — a subagent-registry hiccup must not break plugin load
+        log.exception("[design-system] failed to register the design-critic subagent")
+
     # Arm the drift watch (native scheduler, ADR 0050) — owned by this plugin, so a disable/
     # uninstall cancels it; idempotent by job_id, so a reload re-arms cleanly.
     cron = str(cfg.get("watch_cron", _DEFAULTS["watch_cron"]) or "").strip()
@@ -273,4 +331,4 @@ def register(registry) -> None:
         except Exception:  # noqa: BLE001 — a scheduler hiccup must never break plugin load
             log.exception("[design-system] failed to arm the drift watch")
 
-    log.info("[design-system] registered 6 tools (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
+    log.info("[design-system] registered 6 tools + design-critic subagent (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")

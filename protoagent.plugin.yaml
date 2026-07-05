@@ -1,6 +1,6 @@
 id: design-system
 name: Design System
-version: 0.1.0
+version: 0.2.0
 description: >-
   Matt's live window into the protoLabs.studio design system. Reads @protolabsai/design
   tokens, the packages/ui component inventory, and the visual-identity rules STRAIGHT FROM

@@ -25,6 +25,17 @@ from the repo at call time** — the anti-drift principle, as tools.
 | `ds_check <css\|jsx>` | flags a hardcoded hex a token already defines → the token to use instead |
 | `ds_drift` | what changed since the last check (tokens + components); updates a snapshot |
 
+## `design-critic` subagent
+
+The plugin also registers a **`design-critic`** subagent (ADR 0018) — an adversarial design +
+accessibility reviewer. Hand it a UI prototype or component (JSX/TSX/HTML/CSS) + what it's for
+via `task("design-critic", …)`; it reviews against the **live** design system (grounded through
+the `ds_*` tools — tokens, rules, existing components) and WCAG a11y, and returns prioritized
+**BLOCKER / SHOULD-FIX / NIT** findings + a `ship-ready | revise | blocked` verdict. It reviews,
+it doesn't rewrite — the QA half of "prototype → critique → PR" (text, not pixels). Pairs with a
+`component-author` delegate (a strong coding model on the gateway) that turns an approved prototype
+into a real `packages/ui` PR.
+
 ## Drift watch
 
 `register()` arms a **native recurring watch** (protoAgent scheduler — no external cron/service):
