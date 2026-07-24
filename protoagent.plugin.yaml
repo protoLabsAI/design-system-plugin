@@ -1,6 +1,6 @@
 id: design-system
 name: Design System
-version: 0.3.1
+version: 0.3.2
 description: >-
   The agent's live window into a design system. Reads the configured repo's design
   tokens, the packages/ui component inventory, and the visual-identity rules STRAIGHT FROM
@@ -9,8 +9,6 @@ description: >-
   token vocabulary (ds_check); and a recurring DRIFT WATCH that nudges the agent when the
   design system moves (tokens change, components added/removed) so docs + consumers stay in
   sync. Read-live-not-cache is the whole point — the design system is a live source of truth.
-
-requires_pip: [coloraide>=2]   # LCH color science for the theme-designer tools
 
 # Per-agent opt-in (turned on via the frontend bundle's enable list); not shipped on.
 

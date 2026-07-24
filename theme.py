@@ -8,13 +8,19 @@ theme, let alone apply one.
 
 Pure logic lives here (unit-testable, no protoAgent imports); the `theme_apply`
 persistence seam is injected by ``__init__`` so this module stays host-agnostic.
-Color math via ``coloraide`` (requires_pip) — LCH interpolation + WCAG contrast
-without hand-rolled conversion matrices.
+Color math via the in-repo ``colorcore`` module (pure Python, D65 CIELAB/LCH +
+WCAG luminance) — plugin tools import in the HOST process, where the frozen
+desktop app can never grow a wheel, so a pip dependency was never viable here.
 """
 
 from __future__ import annotations
 
-from coloraide import Color
+import importlib.util as _ilu
+from pathlib import Path as _Path
+
+_spec = _ilu.spec_from_file_location("design_system_colorcore", _Path(__file__).resolve().parent / "colorcore.py")
+cc = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(cc)
 
 # The scale positions proto2 used (Tailwind-style stops, 11 steps, 50→950).
 SCALE_STOPS = (50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950)
@@ -29,23 +35,17 @@ HARMONY_ROTATIONS = {
 }
 
 
-def _hex(c: Color) -> str:
-    return c.convert("srgb").fit(method="lch-chroma").to_string(hex=True)
-
-
-def _lch(color: str) -> Color:
-    return Color(color).convert("lch")
+def _norm_hex(color: str) -> str:
+    return cc.to_hex(cc.parse_hex(color))
 
 
 def scale(base: str, steps: int = 11) -> list[str]:
     """A perceptually-uniform lightness scale through ``base`` — proto2's recipe:
     interpolate base@L95 → base → base@L15 in LCH and sample ``steps`` colors.
     Light end first (step 50) → dark end last (step 950)."""
-    b = _lch(base)
-    light = b.clone().set("lightness", 95)
-    dark = b.clone().set("lightness", 15)
-    ramp = Color.interpolate([light, b, dark], space="lch")
-    return [_hex(ramp(i / (steps - 1))) for i in range(steps)]
+    L, C, h = cc.hex_to_lch(base)
+    stops = [(95.0, C, h), (L, C, h), (15.0, C, h)]
+    return [cc.lch_to_hex(cc.interp_lch(stops, i / (steps - 1))) for i in range(steps)]
 
 
 def harmony(base: str, kind: str) -> list[str]:
@@ -53,18 +53,15 @@ def harmony(base: str, kind: str) -> list[str]:
     complementary | triadic | analogous."""
     if kind not in HARMONY_ROTATIONS:
         raise ValueError(f"unknown harmony {kind!r} — pick one of {sorted(HARMONY_ROTATIONS)}")
-    b = _lch(base)
-    out = []
-    for rot in HARMONY_ROTATIONS[kind]:
-        c = b.clone()
-        c.set("hue", (c.get("hue") + rot) % 360)
-        out.append(_hex(c))
-    return out
+    L, C, h = cc.hex_to_lch(base)
+    return [cc.lch_to_hex((L, C, (h + rot) % 360)) for rot in HARMONY_ROTATIONS[kind]]
 
 
 def contrast(fg: str, bg: str) -> dict:
     """WCAG 2.x contrast ratio + level verdicts for a color pair."""
-    ratio = Color(fg).contrast(bg, method="wcag21")
+    lf = cc.wcag_luminance(cc.parse_hex(fg))
+    lb = cc.wcag_luminance(cc.parse_hex(bg))
+    ratio = (max(lf, lb) + 0.05) / (min(lf, lb) + 0.05)
     return {
         "ratio": round(ratio, 2),
         "aa_normal": ratio >= 4.5,
@@ -86,7 +83,7 @@ def palette(base: str, kind: str = "complementary") -> dict:
         **{name: scale(hexv) for name, hexv in SEMANTIC_BASES.items()},
     }
     return {
-        "base": _hex(Color(base)),
+        "base": _norm_hex(base),
         "harmony": kind,
         "scales": {name: dict(zip(SCALE_STOPS, s)) for name, s in families.items()},
     }
@@ -144,9 +141,9 @@ def validate_overrides(overrides: dict) -> tuple[dict, list[str]]:
         if not isinstance(v, str) or not v.strip():
             raise ValueError(f"override {k} has a non-string/empty value")
         try:
-            Color(v)
-        except Exception:  # noqa: BLE001 — non-color tokens (radius, fonts) pass through
-            warnings.append(f"{k}: {v!r} is not a parseable color — passed through unvalidated")
+            cc.parse_hex(v)
+        except ValueError:  # non-hex tokens (radius, fonts, rgb()/oklch() strings) pass through
+            warnings.append(f"{k}: {v!r} is not a parseable hex color — passed through unvalidated")
         clean[k] = v.strip()
     fg, bg = clean.get("--pl-color-fg"), clean.get("--pl-color-bg")
     if fg and bg:
