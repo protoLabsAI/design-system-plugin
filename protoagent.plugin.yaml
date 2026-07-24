@@ -10,6 +10,8 @@ description: >-
   design system moves (tokens change, components added/removed) so docs + consumers stay in
   sync. Read-live-not-cache is the whole point — the design system is a live source of truth.
 
+requires_pip: [coloraide>=2]   # LCH color science for the theme-designer tools
+
 # Per-agent opt-in (turned on via the frontend bundle's enable list); not shipped on.
 
 # Defaults — overridable per agent (ADR 0019 settings below). Point at another studio
