@@ -1,7 +1,7 @@
 # design-system-plugin
 
-The agent's **live window into the protoLabs.studio design system**. A protoAgent plugin
-([ADR 0027](https://github.com/protoLabsAI/protoAgent)) — Matt's first domain capability on
+The agent's **live window into a design system**. A protoAgent plugin
+([ADR 0027](https://github.com/protoLabsAI/protoAgent)) — a first-party domain capability on
 top of the [frontend-bundle](https://github.com/protoLabsAI/frontend-bundle).
 
 > **Private** — reads a private repo (protoContent) via the GitHub API with `GH_TOKEN`.
@@ -61,7 +61,7 @@ token the `github` plugin uses; protoContent is private). No separate plugin sec
 
 ## Install
 
-Ships via the **frontend-bundle** (Matt's archetype) — `enabled: [delegates, github, design-system]`.
+Ships via **[design-system-stack](https://github.com/protoLabsAI/design-system-stack)** (the Design System Engineer archetype) — `enabled: [delegates, artifact, design-system, github]`.
 Or install standalone:
 
 ```bash

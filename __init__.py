@@ -1,4 +1,4 @@
-"""design-system plugin (ADR 0027) — the agent's LIVE window into the protoLabs.studio
+"""design-system plugin (ADR 0027) — the agent's LIVE window into a
 design system.
 
 The design system is a live source of truth: ``@protolabsai/design`` owns the brand values
@@ -104,7 +104,7 @@ def _component_names(entries: list[dict]) -> list[str]:
 
 @tool
 def ds_tokens() -> str:
-    """Return the LIVE protoLabs.studio design tokens — the current source-of-truth vocabulary
+    """Return the LIVE design tokens from the configured DS repo — the current source-of-truth vocabulary
     (colors, spacing, radius, typography, …) from @protolabsai/design. Read this before writing
     ANY styling; never hardcode a value a token already defines. Fetched live from the repo."""
     try:
@@ -250,7 +250,7 @@ def ds_drift() -> str:
 # ── design-critic subagent ────────────────────────────────────────────────────
 
 _CRITIC_PROMPT = """You are the **design-critic** — an adversarial design + accessibility reviewer for
-protoLabs.studio UI. You are given a UI prototype or component (JSX / TSX / HTML / CSS) and what it's
+the configured design system. You are given a UI prototype or component (JSX / TSX / HTML / CSS) and what it's
 for. Review it against the **live design system** and accessibility, and return concrete, prioritized
 findings the author can act on. You review; you do not rewrite.
 
