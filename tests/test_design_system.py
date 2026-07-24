@@ -168,3 +168,56 @@ def test_headers_no_token_no_auth_header(monkeypatch):
     monkeypatch.setattr(ds, "_CLI_TOKEN", "")  # probed-and-absent → unauthenticated
     h = ds._headers("application/vnd.github.raw")
     assert "Authorization" not in h
+# ── theme-designer engine (theme.py, loaded the same by-path way) ──
+_tspec = importlib.util.spec_from_file_location("design_system_theme", Path(__file__).resolve().parent.parent / "theme.py")
+th = importlib.util.module_from_spec(_tspec)
+_tspec.loader.exec_module(th)
+
+
+def test_scale_is_11_stops_light_to_dark():
+    s = th.scale("#6366f1")
+    assert len(s) == 11
+    from coloraide import Color
+
+    lightness = [Color(c).convert("lch").get("lightness") for c in s]
+    assert lightness[0] > 85 and lightness[-1] < 25
+    assert all(a >= b - 1e-6 for a, b in zip(lightness, lightness[1:])), "lightness must be monotonically darkening"
+
+
+def test_contrast_known_pairs():
+    assert th.contrast("#000000", "#ffffff")["ratio"] == 21.0
+    rep = th.contrast("#777777", "#888888")
+    assert not rep["aa_normal"] and rep["ratio"] < 1.5
+
+
+def test_harmony_rotations():
+    comp = th.harmony("#ff0000", "complementary")
+    assert len(comp) == 2
+    tri = th.harmony("#ff0000", "triadic")
+    assert len(tri) == 3
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        th.harmony("#ff0000", "square")
+
+
+def test_palette_maps_to_pl_overrides_with_contrast():
+    pal = th.palette("#6366f1", "triadic")
+    mapped = th.overrides_for(pal, "dark")
+    ov = mapped["overrides"]
+    assert set(ov) >= {"--pl-color-bg", "--pl-color-fg", "--pl-color-accent", "--pl-color-status-error"}
+    assert mapped["contrast"]["fg/bg"]["aa_normal"], "generated dark theme must pass AA for fg/bg"
+    light = th.overrides_for(pal, "light")
+    assert light["overrides"]["--pl-color-bg"] != ov["--pl-color-bg"]
+
+
+def test_validate_overrides_gates_keys_and_warns_on_contrast():
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        th.validate_overrides({"color": "#fff"})
+    clean, warns = th.validate_overrides({"--pl-color-fg": "#888888", "--pl-color-bg": "#777777"})
+    assert clean["--pl-color-fg"] == "#888888"
+    assert any("FAILS WCAG AA" in w for w in warns)
+    clean2, warns2 = th.validate_overrides({"--pl-radius": "12px"})
+    assert clean2["--pl-radius"] == "12px" and any("not a parseable color" in w for w in warns2)

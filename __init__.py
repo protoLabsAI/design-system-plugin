@@ -330,13 +330,108 @@ _WATCH_PROMPT = (
 )
 
 
+
+
+_THEME_MOD = None  # loaded by path (the plugin dir isn't an importable package)
+
+
+def _theme_mod():
+    global _THEME_MOD
+    if _THEME_MOD is None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("design_system_theme", Path(__file__).resolve().parent / "theme.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _THEME_MOD = mod
+    return _THEME_MOD
+
+
+# ── theme-designer tools (LCH engine, ported from the operator's proto2 playground) ──
+# Pure color science lives in theme.py; these tools are the agent surface. An agent can
+# design a validated palette and re-theme its own console conversationally — the apply
+# seam is the same {mode, overrides} blob the ThemePanel persists (theme.json, ADR 0042).
+
+
+@tool
+def theme_scale(base_color: str, steps: int = 11) -> str:
+    """A perceptually-uniform color scale from one base color — 11 Tailwind-style stops
+    (50→950) interpolated through LCH lightness (95→15), so steps LOOK evenly spaced.
+    Use for building token families from a brand color. Returns JSON {stop: hex}."""
+    _t = _theme_mod()
+    try:
+        return json.dumps(dict(zip(_t.SCALE_STOPS, _t.scale(base_color, steps))), indent=1)
+    except Exception as exc:  # noqa: BLE001 — tool boundary: legible error string
+        return f"Error: {exc}"
+
+
+@tool
+def theme_contrast(foreground: str, background: str) -> str:
+    """WCAG 2.x contrast check for a color pair — ratio plus AA/AA-large/AAA verdicts.
+    Check EVERY fg/bg pair you propose; never suggest a failing combination without
+    flagging it. Returns JSON."""
+    _t = _theme_mod()
+    try:
+        return json.dumps(_t.contrast(foreground, background))
+    except Exception as exc:  # noqa: BLE001
+        return f"Error: {exc}"
+
+
+@tool
+def theme_palette(base_color: str, harmony: str = "complementary", mode: str = "dark") -> str:
+    """Design a FULL console palette from one base color: harmony-derived primary/
+    secondary/accent scales + fixed semantic hues (success/warning/error/neutral), mapped
+    onto the console's --pl-* override keys for the given mode (dark|light), with a WCAG
+    contrast report for the key pairs. harmony: complementary|triadic|analogous. Review
+    the contrast report, then persist with theme_apply. Returns JSON
+    {palette, mode, overrides, contrast}."""
+    _t = _theme_mod()
+    try:
+        pal = _t.palette(base_color, harmony)
+        mapped = _t.overrides_for(pal, mode)
+        return json.dumps({"palette": pal, **mapped}, indent=1)
+    except Exception as exc:  # noqa: BLE001
+        return f"Error: {exc}"
+
+
+@tool
+def theme_apply(overrides_json: str, mode: str = "dark") -> str:
+    """Apply a console theme: persist {mode, overrides} as this agent's theme (the exact
+    blob the console's ThemePanel reads — takes effect on the next console load/agent
+    switch). overrides_json: a JSON object of --pl-* custom properties → color values
+    (theme_palette's `overrides` output, or hand-picked). Validates keys/colors and
+    contrast-checks fg/bg; warnings are returned but do NOT block — the operator can
+    always reset from the Theme panel. Returns JSON {ok, path, warnings}."""
+    _t = _theme_mod()
+    try:
+        raw = json.loads(overrides_json or "{}")
+        if not isinstance(raw, dict) or not raw:
+            return "Error: overrides_json must be a non-empty JSON object of --pl-* keys"
+        if mode not in ("dark", "light"):
+            return f"Error: mode must be dark|light, got {mode!r}"
+        clean, warnings = _t.validate_overrides(raw)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"Error: {exc}"
+    try:
+        from graph.config_io import theme_json_path
+
+        f = theme_json_path()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"mode": mode, "overrides": clean}, indent=2) + "\n")
+        return json.dumps({"ok": True, "path": str(f), "applied": len(clean), "warnings": warnings})
+    except Exception as exc:  # noqa: BLE001
+        return f"Error: persisting theme failed — {exc}"
+
+
 def register(registry) -> None:
     cfg = registry.config or {}
     for k in _DEFAULTS:
         v = cfg.get(k)
         if v not in (None, ""):
             _CFG[k] = str(v)
-    registry.register_tools([ds_tokens, ds_components, ds_component, ds_rules, ds_check, ds_drift])
+    registry.register_tools([ds_tokens, ds_components, ds_component, ds_rules, ds_check, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply])
 
     # design-critic subagent (ADR 0018) — reviews a prototype/component against the LIVE DS + a11y,
     # grounded via the ds_* tools above. The lead delegates to it with `task("design-critic", …)`.
@@ -358,4 +453,4 @@ def register(registry) -> None:
         except Exception:  # noqa: BLE001 — a scheduler hiccup must never break plugin load
             log.exception("[design-system] failed to arm the drift watch")
 
-    log.info("[design-system] registered 6 tools + design-critic subagent (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
+    log.info("[design-system] registered 10 tools + design-critic subagent (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
