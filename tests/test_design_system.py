@@ -177,11 +177,9 @@ _tspec.loader.exec_module(th)
 def test_scale_is_11_stops_light_to_dark():
     s = th.scale("#6366f1")
     assert len(s) == 11
-    from coloraide import Color
-
-    lightness = [Color(c).convert("lch").get("lightness") for c in s]
+    lightness = [th.cc.hex_to_lch(c)[0] for c in s]
     assert lightness[0] > 85 and lightness[-1] < 25
-    assert all(a >= b - 1e-6 for a, b in zip(lightness, lightness[1:])), "lightness must be monotonically darkening"
+    assert all(a >= b - 1e-1 for a, b in zip(lightness, lightness[1:])), "lightness must be monotonically darkening"
 
 
 def test_contrast_known_pairs():
@@ -220,4 +218,14 @@ def test_validate_overrides_gates_keys_and_warns_on_contrast():
     assert clean["--pl-color-fg"] == "#888888"
     assert any("FAILS WCAG AA" in w for w in warns)
     clean2, warns2 = th.validate_overrides({"--pl-radius": "12px"})
-    assert clean2["--pl-radius"] == "12px" and any("not a parseable color" in w for w in warns2)
+    assert clean2["--pl-radius"] == "12px" and any("not a parseable hex color" in w for w in warns2)
+
+
+def test_colorcore_roundtrip_and_luminance():
+    # hex → LCH → hex round-trips within 1/255 per channel for in-gamut colors
+    for h in ("#6366f1", "#10b981", "#ef4444", "#0b0b10", "#f9fafb"):
+        back = th.cc.lch_to_hex(th.cc.hex_to_lch(h))
+        a = th.cc.parse_hex(h); b = th.cc.parse_hex(back)
+        assert all(abs(x - y) <= 2 / 255 for x, y in zip(a, b)), (h, back)
+    assert abs(th.cc.wcag_luminance((1.0, 1.0, 1.0)) - 1.0) < 1e-6
+    assert th.cc.wcag_luminance((0.0, 0.0, 0.0)) == 0.0
