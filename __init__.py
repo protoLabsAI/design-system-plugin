@@ -56,9 +56,36 @@ def _cfg(key: str) -> str:
 # ── GitHub contents API (token-authed; protoContent is private) ───────────────
 
 
+_CLI_TOKEN: str | None = None  # resolved once per process; "" = probed and absent
+
+
+def _gh_cli_token() -> str:
+    """Token from an authed ``gh`` CLI (``gh auth token``) — the fallback when the
+    process env carries none. Desktop-app workspaces inherit the app's env, which
+    a Finder launch never seeds with GITHUB_TOKEN/GH_TOKEN, but the host's gh CLI
+    is typically authed (it's how the github plugin works at all). Probed once and
+    cached; a missing/unauthed gh degrades to unauthenticated reads exactly as
+    before."""
+    global _CLI_TOKEN
+    if _CLI_TOKEN is None:
+        import shutil
+        import subprocess
+
+        tok = ""
+        gh = shutil.which("gh") or "/opt/homebrew/bin/gh"
+        try:
+            out = subprocess.run([gh, "auth", "token"], capture_output=True, text=True, timeout=10)
+            if out.returncode == 0:
+                tok = out.stdout.strip()
+        except OSError:
+            tok = ""
+        _CLI_TOKEN = tok
+    return _CLI_TOKEN
+
+
 def _headers(accept: str) -> dict[str, str]:
     h = {"Accept": accept, "User-Agent": "protoagent-design-system"}
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or _gh_cli_token()
     if token:
         h["Authorization"] = f"Bearer {token}"
     return h

@@ -143,3 +143,28 @@ def test_design_critic_subagent_shape():
         assert t in sc.tools
     assert "review" in sc.description.lower() and "accessib" in sc.system_prompt.lower()
     assert "BLOCKER" in sc.system_prompt and "verdict" in sc.system_prompt.lower()
+
+
+def test_headers_fall_back_to_gh_cli_token(monkeypatch):
+    # Env empty → the gh CLI's token authorizes the read (desktop-app workspaces
+    # inherit a Finder-launched env that never carries GITHUB_TOKEN/GH_TOKEN).
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(ds, "_CLI_TOKEN", "cli-tok-123")
+    h = ds._headers("application/vnd.github.raw")
+    assert h["Authorization"] == "Bearer cli-tok-123"
+
+
+def test_headers_env_token_wins_over_cli(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "env-tok")
+    monkeypatch.setattr(ds, "_CLI_TOKEN", "cli-tok")
+    h = ds._headers("application/vnd.github.raw")
+    assert h["Authorization"] == "Bearer env-tok"
+
+
+def test_headers_no_token_no_auth_header(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(ds, "_CLI_TOKEN", "")  # probed-and-absent → unauthenticated
+    h = ds._headers("application/vnd.github.raw")
+    assert "Authorization" not in h
