@@ -1,6 +1,6 @@
 id: design-system
 name: Design System
-version: 0.2.0
+version: 0.3.1
 description: >-
   The agent's live window into a design system. Reads the configured repo's design
   tokens, the packages/ui component inventory, and the visual-identity rules STRAIGHT FROM
