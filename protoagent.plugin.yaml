@@ -2,7 +2,7 @@ id: design-system
 name: Design System
 version: 0.2.0
 description: >-
-  Matt's live window into the protoLabs.studio design system. Reads @protolabsai/design
+  The agent's live window into a design system. Reads the configured repo's design
   tokens, the packages/ui component inventory, and the visual-identity rules STRAIGHT FROM
   protoContent — so the current design vocabulary is never a stale copy frozen in knowledge.
   Tools: read tokens / components / a component's story / the rules; lint code against the
