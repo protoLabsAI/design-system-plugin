@@ -59,6 +59,20 @@ _DEFAULTS = {
 # config reload). Process-local — each fleet member runs its own server process.
 _CFG: dict[str, str] = dict(_DEFAULTS)
 
+# registry.emit, captured at register(). Plugins coordinate over the bus, never by importing
+# each other (ADR 0039) — so drift is BROADCAST and anything that cares subscribes, rather
+# than this plugin knowing who its consumers are.
+_EMIT = None
+
+
+def _emit(topic: str, data: dict) -> None:
+    if _EMIT is None:
+        return
+    try:
+        _EMIT(topic, data)
+    except Exception:  # noqa: BLE001 — a bus hiccup must never break a tool call
+        log.exception("[design-system] emit %s failed", topic)
+
 
 def _cfg(key: str) -> str:
     return str(_CFG.get(key) or _DEFAULTS.get(key) or "")
@@ -141,15 +155,26 @@ def _component_names(entries: list[dict]) -> list[str]:
 
 
 @tool
-def ds_tokens() -> str:
+def ds_tokens(section: str = "") -> str:
     """The LIVE design-token vocabulary — every ``--pl-*`` custom property with its dark and
     light value. This is the vocabulary you must write styling in: never hardcode a color,
-    space, radius, or duration that appears here; use ``var(--pl-…)``. Fetched live from the
-    configured repo, so it reflects the system as it is now, not as it was."""
+    space, radius, or duration that appears here; use ``var(--pl-…)``.
+
+    Pass ``section`` to fetch just one family — "Color", "Space", "Typography", "Elevation",
+    "Radius", "Motion", "Gradient", "Border" — when that's all you need; the full set is a few
+    thousand characters and most questions only touch one family."""
     try:
+        secs = _token_sections()
+        want = (section or "").strip().lower()
+        if want:
+            secs = [x for x in secs if x["section"].lower() == want]
+            if not secs:
+                return f"No token section named {section!r}. Sections: " + ", ".join(
+                    x["section"] for x in _token_sections()
+                )
         return (
             "Live design tokens — write var(--pl-…), never the literal:\n"
-            + _tokens_mod().summarize(_token_sections())
+            + _tokens_mod().summarize(secs)
         )
     except RuntimeError as e:
         # A DS that doesn't publish a built CSS still has the source values worth reading.
@@ -187,6 +212,39 @@ def ds_component(name: str) -> str:
         return f"{safe}.stories.tsx:\n" + _gh_get_raw(f"{_cfg('components_path')}/{safe}.stories.tsx")
     except RuntimeError as e:
         return f"ds_component error: {e}. Check the exact name with ds_components."
+
+
+@tool
+def ds_search(query: str) -> str:
+    """Search the design system by keyword — components, variants and tokens at once. The
+    fastest way to answer "do we have a…" before building anything: it matches component and
+    variant names AND token names/values, so "toast", "danger" or "spacing" all land. Use this
+    first; fall back to ds_stories / ds_tokens only when you need the full inventory."""
+    q = (query or "").strip().lower()
+    if not q:
+        return "ds_search: give a keyword (e.g. 'toast', 'danger', 'spacing')."
+    hits: list[str] = []
+    try:
+        for comp in _sb_components():
+            variants = [st["name"] for st in comp["stories"] if q in st["name"].lower()]
+            if q in comp["title"].lower() or variants:
+                shown = ", ".join(variants or [st["name"] for st in comp["stories"]][:4])
+                hits.append(f"- COMPONENT {comp['title']} — {shown}")
+    except RuntimeError as e:
+        hits.append(f"- (components unavailable: {e})")
+    try:
+        for sec in _token_sections():
+            for t in sec["tokens"]:
+                if q in t["name"] or q in str(t["value"]).lower():
+                    hits.append(f"- TOKEN var({t['var']}) = {t['value']}")
+    except RuntimeError as e:
+        hits.append(f"- (tokens unavailable: {e})")
+    if not hits:
+        return (
+            f"No component, variant or token matches {query!r}. The system may genuinely not "
+            "cover this — say so rather than inventing one, and propose an extension if it's warranted."
+        )
+    return f"{len(hits)} match(es) for {query!r}:\n" + "\n".join(hits[:40])
 
 
 @tool
@@ -444,6 +502,15 @@ def ds_drift() -> str:
         changes.append(f"• Components REMOVED: {', '.join(removed)} — check for dangling references + docs.")
     if not changes:
         return "ds_drift: no change since the last check. ✓"
+    # Broadcast it: consumers (docs, a console badge, another plugin) subscribe by topic
+    # rather than this plugin knowing who they are.
+    _emit("drift-detected", {
+        "repo": _cfg("repo"),
+        "ref": _cfg("ref"),
+        "tokens_changed": prev.get("tokens_sha") != cur["tokens_sha"],
+        "components_added": added,
+        "components_removed": removed,
+    })
     return "Design-system DRIFT since last check:\n" + "\n".join(changes)
 
 
@@ -521,12 +588,9 @@ How to answer:
   likely reading and note the other briefly rather than asking and stalling."""
 
 
-# The explainer's toolset, as objects. ONE source: the subagent's allowlist is derived from
-# it, and the ask route injects the same list as `extra_tools`. Two reasons that matters:
-# a subagent resolves its allowlist against the LEAD agent's bound tool map, which a plugin
-# route has no part in building — so relying on the host having bound these degrades to
-# "No tools available for subagent" with nothing explaining why. And deriving the names
-# means the allowlist can never drift from what is actually injected.
+# The explainer's toolset, as objects — the allowlist is derived from it so a rename can't
+# silently drop a tool. These resolve from the lead agent's bound tool map at dispatch, which
+# is the normal path for a chat- or task()-driven subagent.
 def _explainer_tools() -> list:
     return [ds_rules, ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_check]
 
@@ -559,9 +623,15 @@ Ground everything in the live system before you write a line of markup:
 - `ds_stories` / `ds_story` — what the system already ships. If a component covers this,
   compose it rather than rebuilding it.
 
-Return **one HTML fragment** and nothing else:
-- No `<html>`, `<head>`, `<body>`, no `<style>` block, no `<script>`. The kit stylesheet and the
-  operator's theme are already applied around your markup — a style block would fight them.
+**Render it with `show_artifact`** — that is how a prototype reaches the operator. Pass
+`kind="html"` and a fragment structured with `.pl-*` classes, or `kind="react"` to compose the
+real `@pl/ui` components the artifact sandbox provides. Then call `check_artifact` and fix
+anything it reports before you hand back. Say what you built and why in a sentence; the
+artifact panel carries the visual, so don't paste the markup into your reply as well.
+
+Writing the markup:
+- No `<html>`, `<head>`, `<body>`, no `<style>` block. The kit stylesheet and the operator's
+  theme are applied around your markup — a style block would fight them.
 - Structure with `.pl-*` classes. Inline `style="…"` ONLY for layout the kit has no class for
   (a grid template, a gap), and only using `var(--pl-…)` values.
 - Semantic, accessible markup: real `<button>`/`<label>`/`<nav>`, labels tied to inputs, alt text,
@@ -569,12 +639,17 @@ Return **one HTML fragment** and nothing else:
   inaccessible one is shipping a bug.
 - Realistic content, not lorem ipsum. Plausible labels and copy make a prototype judgeable.
 
-If the intent is already covered by an existing component, build it FROM that component and say so
-in a leading HTML comment. If the system genuinely lacks what's needed, compose the nearest
-primitives and name the gap in that comment. Output the fragment only — no prose, no code fence."""
+If the intent is already covered by an existing component, build it FROM that component and say so.
+If the system genuinely lacks what's needed, compose the nearest primitives and name the gap —
+a named gap is a design-system finding, and worth more than a silent one-off."""
 
 
 def _designer_tools() -> list:
+    """This plugin's half of the designer's toolset. It also needs `show_artifact` /
+    `check_artifact` to render, which belong to the ARTIFACT plugin — named in the allowlist
+    below rather than imported, because plugins coordinate through the host, never by
+    importing each other (ADR 0039). An unresolved name is simply skipped, so the designer
+    degrades to describing the prototype when artifact is off instead of failing."""
     return [ds_rules, ds_kit_classes, ds_tokens, ds_stories, ds_story, ds_check]
 
 
@@ -589,8 +664,8 @@ def _build_designer():
             "before it becomes code. Returns a fragment, not a page."
         ),
         system_prompt=_DESIGNER_PROMPT,
-        tools=[t.name for t in _designer_tools()],
-        max_turns=14,
+        tools=[t.name for t in _designer_tools()] + ["show_artifact", "check_artifact"],
+        max_turns=16,
     )
 
 
@@ -719,34 +794,6 @@ def _build_view_router():
     return router
 
 
-_BANNER_RE = re.compile(r"^\s*\[[^\]\n]*\bcompleted\b[^\]\n]*\]\s*", re.I)
-
-
-def _strip_subagent_banner(text: str) -> str:
-    """Drop the dispatcher's ``[<name> completed: <description>]`` prefix.
-
-    That banner is for a chat transcript, where it says which delegate answered. In a pane
-    that only ever shows this one subagent it is noise sitting above every answer.
-    """
-    return _BANNER_RE.sub("", text or "", count=1).strip()
-
-
-_FENCE_RE = re.compile(r"^\s*```[a-z]*\s*\n(.*?)\n?\s*```\s*$", re.S | re.I)
-# A prototype is rendered in a sandboxed frame, but a <script> or a <style> would still fight
-# the kit stylesheet and the operator's theme — and the subagent is told not to emit them, so
-# stripping is the backstop for when it does anyway.
-_BLOCK_TAG_RE = re.compile(r"<(script|style)\b.*?</\1\s*>", re.S | re.I)
-
-
-def _fragment_only(text: str) -> str:
-    """Unwrap a code fence and drop script/style — the model was asked for a bare fragment."""
-    body = (text or "").strip()
-    m = _FENCE_RE.match(body)
-    if m:
-        body = m.group(1)
-    return _BLOCK_TAG_RE.sub("", body).strip()
-
-
 def _build_data_router():
     from fastapi import APIRouter
 
@@ -790,85 +837,6 @@ def _build_data_router():
             out["components_error"] = str(e)
         return out
 
-    @router.post("/ask")
-    async def ask(body: dict) -> dict:
-        """Answer a question about the design system, grounded in the live system.
-
-        Delegates to the ds-explainer subagent rather than answering from the route, so the
-        answer is produced by the same grounded reasoning the agent uses in chat — one place
-        where "what does this system actually contain" is decided.
-        """
-        question = str((body or {}).get("question") or "").strip()
-        if not question:
-            return {"ok": False, "error": "Ask a question about the design system."}
-        if len(question) > 2000:
-            return {"ok": False, "error": "That question is too long — trim it to 2000 characters."}
-        try:
-            from graph.sdk import run_subagent
-
-            answer = await run_subagent(
-                "ds-explainer",
-                question,
-                description="Answer a design-system question",
-                extra_tools=_explainer_tools(),
-            )
-        except Exception as exc:  # noqa: BLE001 — surface the cause in the pane, don't 500
-            log.exception("[design-system] ask failed")
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        return {"ok": True, "answer": _strip_subagent_banner(answer)}
-
-    @router.post("/design")
-    async def design(body: dict) -> dict:
-        """Build a prototype of a new component/layout out of this design system."""
-        intent = str((body or {}).get("intent") or "").strip()
-        if not intent:
-            return {"ok": False, "error": "Describe what you want designed."}
-        if len(intent) > 2000:
-            return {"ok": False, "error": "That brief is too long — trim it to 2000 characters."}
-        try:
-            from graph.sdk import run_subagent
-
-            html = await run_subagent(
-                "ds-designer", intent,
-                description="Prototype a component from the design system",
-                extra_tools=_designer_tools(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.exception("[design-system] design failed")
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        return {"ok": True, "html": _fragment_only(_strip_subagent_banner(html))}
-
-    @router.post("/critique")
-    async def critique(body: dict) -> dict:
-        """Review a prototype against the live system + a11y — the QA half of the loop."""
-        code = str((body or {}).get("code") or "").strip()
-        if not code:
-            return {"ok": False, "error": "Nothing to critique yet — design something first."}
-        try:
-            from graph.sdk import run_subagent
-
-            review = await run_subagent(
-                "design-critic",
-                # Tell it what it's looking at. Without this the top finding is always "use the
-                # React component API instead of .pl-* classes" — true of production code, but
-                # this is a no-build kit prototype where those classes ARE the correct output,
-                # so it burns the most valuable slot on the one thing that isn't a defect.
-                (
-                    "Review this PROTOTYPE. It is a no-build HTML fragment rendered with the design "
-                    "system's published kit stylesheet, so `.pl-*` classes are the intended output "
-                    "here — judge it on design-system fidelity, accessibility, layout and states, "
-                    "not on the fact that it isn't React. If the eventual production component "
-                    "should compose an existing component, note that once, briefly.\n\n"
-                    f"Intent: {str((body or {}).get('intent') or 'a design-system prototype')}\n\n{code}"
-                ),
-                description="Critique a design-system prototype",
-                extra_tools=_explainer_tools(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.exception("[design-system] critique failed")
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        return {"ok": True, "review": _strip_subagent_banner(review)}
-
     @router.post("/refresh")
     def refresh() -> dict:
         """Drop the Storybook cache so a DS deploy shows up without waiting out the TTL."""
@@ -880,7 +848,9 @@ def _build_data_router():
 
 
 def register(registry) -> None:
+    global _EMIT
     cfg = registry.config or {}
+    _EMIT = getattr(registry, "emit", None)
     for k in _DEFAULTS:
         v = cfg.get(k)
         if v not in (None, ""):
@@ -889,7 +859,7 @@ def register(registry) -> None:
     registry.register_router(_build_view_router(), prefix="/plugins/design-system")
     # DATA: gated /api/plugins/design-system — fetched with the handshake token.
     registry.register_router(_build_data_router(), prefix="/api/plugins/design-system")
-    registry.register_tools([ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_kit_classes, ds_rules, ds_check, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply])
+    registry.register_tools([ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_search, ds_kit_classes, ds_rules, ds_check, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply])
 
     # design-critic subagent (ADR 0018) — reviews a prototype/component against the LIVE DS + a11y,
     # grounded via the ds_* tools above. The lead delegates to it with `task("design-critic", …)`.
@@ -912,4 +882,4 @@ def register(registry) -> None:
         except Exception:  # noqa: BLE001 — a scheduler hiccup must never break plugin load
             log.exception("[design-system] failed to arm the drift watch")
 
-    log.info("[design-system] registered 13 tools + design-critic/ds-explainer/ds-designer subagents (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
+    log.info("[design-system] registered 14 tools + design-critic/ds-explainer/ds-designer subagents (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")

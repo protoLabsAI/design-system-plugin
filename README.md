@@ -28,45 +28,43 @@ from the repo at call time** — the anti-drift principle, as tools.
 | `ds_check <css\|jsx>` | flags a hardcoded hex a token already defines → the token to use instead |
 | `ds_drift` | what changed since the last check (tokens + components); updates a snapshot |
 
-## The explorer — a Storybook that the agent can read
+## The explorer — a browse surface, and only that
 
-The plugin serves a console view (**Design System** in the right rail) with two panes:
+The plugin serves one console view (**Design System** in the right rail, also reachable from
+⌘K) with three panes:
 
 - **Foundations** — the live token vocabulary as swatches, type specimens, spacing rules and
   motion values. Themed tokens render as a split chip showing the dark and light face together,
-  because the *pair* is what you actually judge; click any token to copy its `var()`.
-- **Components** — the gallery, one card per variant, filterable by component *or* variant name.
-- **Playground** — one story filling the viewport (stage and controls are full-height
-  panels; nothing scrolls to see the preview) with a controls panel, a width picker
-  (fill / 1280 / 768 / 390) and a theme override. The controls are generated from the
-  story's **own `argTypes`**, which Storybook hands over its channel, so the panel always
-  matches the real component API instead of a schema we'd have to keep in step by hand.
-  Editing a control drives the live component through `updateStoryArgs` — the same message
-  Storybook's own manager sends — and the panel shows the resulting JSX to copy.
-- **Ask** — a question box answered by the `ds-explainer` subagent, grounded in the live
-  tokens, rules and component inventory. "Which button variant for a destructive action?"
-  comes back with the real variant, the real token, and a live preview link; "do we have a
-  date picker?" comes back with *no*, plus the primitives to build one from. Answers are
-  produced by the same subagent the agent uses in chat, so the pane can't drift from it.
-- **Design** — describe a component, layout or styling idea and get a working prototype built
-  out of this system's real classes and tokens, rendered live in a sandboxed frame with the
-  DS's own kit stylesheet and the operator's theme. **Critique** then runs it past
-  `design-critic` for a verdict and prioritised findings. Design → look at it → review, in one
-  place.
+  because the *pair* is what you judge; click any token to copy its `var()`.
+- **Components** — the gallery, one card per variant.
+- **Playground** — one story at full size, with controls generated from its **own `argTypes`**
+  (Storybook hands those over its channel), a width picker and a theme override. Editing a
+  control drives the live component via `updateStoryArgs` — the message Storybook's own manager
+  sends — and the panel shows the resulting JSX to copy.
 
-**The gallery renders the design system's own published Storybook**, not a replica. The inventory
-comes from `index.json` and each card is an `<iframe>` onto that Storybook's `/iframe?id=<story>`.
-So what an operator browses is the real library at its current deploy — a plugin whose whole
-purpose is preventing drift has no business maintaining a second copy of the components. It also
-means the taxonomy in the sidebar is the design system's *own* (Foundations, Primitives, Layout,
-Navigation…), inherited rather than imposed.
+**The gallery renders the design system's own published Storybook**, not a replica. The
+inventory comes from `index.json` and each card is an `<iframe>` onto that Storybook's
+`/iframe?id=<story>`. A plugin whose purpose is preventing drift has no business maintaining a
+second copy of the components — and the sidebar taxonomy is then the design system's *own*
+(Foundations, Primitives, Layout, Navigation…), inherited rather than imposed.
 
-Story frames are rendered in the operator's current console theme (passed through as Storybook's
-`theme` global), so a gallery never sits in dark while the console is in light — which is how a
-contrast regression stays invisible until someone ships it.
+Story frames render in the operator's current console theme, so the gallery never sits in dark
+while the console is in light — which is how a contrast regression stays invisible.
 
 Point `storybook_url` at any published Storybook. Leave it blank and the gallery turns off; the
-token, rules and lint tools keep working, so a design system without a Storybook is still usable.
+token, rules and lint tools keep working.
+
+### What this view deliberately does NOT do
+
+It has no chat box and no prototype preview frame. protoAgent already ships a chat system and
+an **artifact plugin**; a second question box means a second markdown renderer, a second escape
+path and a second loading state, and a second preview frame means reimplementing sandboxing,
+versioning and render verification that `show_artifact` already does properly.
+
+So the agent's half lives in **tools, subagents and a skill** — you ask in chat, and prototypes
+render in the Artifact panel. A view earns its place only for what chat can't do: browsing.
+(This is also where Storybook's own MCP server landed — a pure tool surface, with interaction
+happening in the agent's existing chat.)
 
 ## Subagents
 
@@ -78,13 +76,13 @@ all. Every claim has to come from a `ds_*` call in the same turn. It is told to 
 already exists, and to say "the system has no X yet" rather than invent a plausible token or
 variant; a reasonable extension is offered explicitly as a *proposal*.
 
-Drives the **Ask** pane, and available in chat as `task("ds-explainer", …)`.
+Ask in chat, or `task("ds-explainer", …)`. Its allowlist is derived from the tool objects, so a
+rename can't silently drop one.
 
-> **Note for anyone calling it from a route:** a subagent resolves its allowlist against the
-> **lead agent's** bound tool map, which a plugin route plays no part in building. So the ask
-> route injects the plugin's own tools as `extra_tools`; without that the call degrades to
-> `No tools available for subagent 'ds-explainer'` with nothing explaining why. The allowlist
-> is derived from that same list so the two can't drift.
+> **If you ever drive a subagent from a plugin ROUTE:** it resolves its allowlist against the
+> **lead agent's** bound tool map, which a route plays no part in building — the call degrades
+> to `No tools available for subagent '<name>'` with nothing explaining why. Pass `extra_tools`
+> explicitly (`graph.sdk.run_subagent`). Not needed here: these are chat-driven.
 
 ### `ds-designer`
 
@@ -94,7 +92,14 @@ invention (`.pl-datepicker`) renders as an unstyled div: only classes the kit ac
 will look like anything. Told to compose an existing component when one covers the case, and to
 name the gap in a leading comment when none does.
 
-Drives the **Design** pane; `task("ds-designer", …)` in chat.
+It **renders with `show_artifact`** and self-checks with `check_artifact` — the artifact plugin
+already gives sandboxed rendering, versioning, `update_artifact`/`rewrite_artifact` and a render
+verdict, so this plugin doesn't reimplement any of it. Those two tools are named in its
+allowlist rather than imported: plugins coordinate through the host, never by importing each
+other (ADR 0039). An unresolved name is skipped, so with the artifact plugin off the designer
+degrades to describing the prototype instead of failing.
+
+`task("ds-designer", …)` in chat, then `task("design-critic", …)` to review it.
 
 ### `design-critic` subagent
 
@@ -106,6 +111,21 @@ the `ds_*` tools — tokens, rules, existing components) and WCAG a11y, and retu
 it doesn't rewrite — the QA half of "prototype → critique → PR" (text, not pixels). Pairs with a
 `component-author` delegate (a strong coding model on the gateway) that turns an approved prototype
 into a real `packages/ui` PR.
+
+## Skill
+
+`skills/using-the-design-system/SKILL.md` auto-loads and carries the agent-facing contract:
+*never name a component, variant, prop or token you have not read from a tool this turn*; search
+before you build; say the system doesn't cover something rather than inventing a token; render
+inventories with `show_component`; prototype → critique → PR. This is guidance, so it belongs in
+a skill — it reaches the agent in chat, inside a `task()`, and on a scheduled turn alike.
+
+## Events (ADR 0039)
+
+`ds_drift` broadcasts **`design-system.drift-detected`** with the repo/ref, whether tokens moved,
+and which components were added or removed. Declared in the manifest, so it's discoverable in
+`/api/runtime/status` and a consumer doesn't have to reverse-engineer the payload. Broadcast
+rather than wired: this plugin doesn't need to know who cares.
 
 ## Drift watch
 
