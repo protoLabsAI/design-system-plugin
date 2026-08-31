@@ -813,3 +813,14 @@ def test_ships_an_agent_facing_skill():
     assert "Never name a component, variant, prop, class or token you have not read" in body
     for tool in ("ds_search", "ds_story", "ds_check", "show_component", "ds-designer"):
         assert tool in body, f"skill never mentions {tool}"
+
+
+def test_readme_documents_mcp_exposure_without_shipping_a_server():
+    """`register_mcp_server` is for a server the agent CONNECTS TO. Exposing our tools
+    outward is already the host's operator-MCP surface, so this plugin documents the config
+    rather than shipping a redundant server."""
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    assert "operator_mcp_tools:" in readme
+    assert "register_mcp_server" in readme and "wrong seam" in readme
+    src = (Path(__file__).resolve().parent.parent / "__init__.py").read_text()
+    assert "register_mcp_server" not in src, "don't ship an MCP server; the host already exposes tools"

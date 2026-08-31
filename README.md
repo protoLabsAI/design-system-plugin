@@ -127,6 +127,33 @@ and which components were added or removed. Declared in the manifest, so it's di
 `/api/runtime/status` and a consumer doesn't have to reverse-engineer the payload. Broadcast
 rather than wired: this plugin doesn't need to know who cares.
 
+## Using it from Claude Code / Cursor (MCP)
+
+The design system is reachable from any MCP client **without this plugin shipping an MCP
+server** — protoAgent's operator MCP surface already exposes plugin tools (ADR 0075). Name the
+ones you want in the host config:
+
+```yaml
+operator_mcp_tools:
+  - ds_search        # components, variants and tokens by keyword
+  - ds_stories       # the published inventory
+  - ds_story         # one component's variants + live preview URLs
+  - ds_component     # a component's story source (props, usage)
+  - ds_tokens        # the --pl-* vocabulary (takes a section)
+  - ds_kit_classes   # the no-build class vocabulary
+  - ds_rules         # the visual-identity rules
+  - ds_check         # lint a snippet against the tokens
+```
+
+The allowlist is **deny-by-default**, so a foreign client gets only what you name (`"*"` exposes
+everything). All fourteen tools are MCP-safe — none are on the HITL incompatible list. The
+tool docstrings are what the client sees as tool descriptions, which is why they read as
+instructions rather than summaries.
+
+This is deliberately not a `register_mcp_server` call: **that seam is for a server the agent
+*connects to*, not one it exposes.** The outward direction is already solved by the host, so
+shipping one here would be both the wrong seam and a duplicate.
+
 ## Drift watch
 
 `register()` arms a **native recurring watch** (protoAgent scheduler — no external cron/service):
