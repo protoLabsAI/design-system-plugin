@@ -18,12 +18,13 @@ from the repo at call time** — the anti-drift principle, as tools.
 
 | Tool | What it returns |
 |---|---|
-| `ds_tokens` | the live token vocabulary — every `--pl-*` var with its dark and light value, read from the generated `tokens.css` |
+| `ds_tokens [section]` | the live token vocabulary — every `--pl-*` var with its dark and light value, read from the generated `tokens.css`; pass a section (`Color`, `Space`, …) to fetch one family |
 | `ds_components` | the component inventory from `packages/ui/src` (the story files) |
 | `ds_component <name>` | one component's story SOURCE — its API, props, usage |
 | `ds_stories` | the published Storybook inventory: every component and every variant name |
 | `ds_story <name>` | one component's variants, each with a **live render URL** you can show the user |
 | `ds_rules` | the visual-identity rules (when to use what, what we don't do) |
+| `ds_search <keyword>` | components, variants **and** tokens matching a keyword — the fastest "do we have a…" |
 | `ds_kit_classes` | the `.pl-*` classes the DS's published kit stylesheet actually defines — the vocabulary a no-build prototype can use |
 | `ds_check <css\|jsx>` | flags a hardcoded hex a token already defines → the token to use instead |
 | `ds_drift` | what changed since the last check (tokens + components); updates a snapshot |
@@ -89,8 +90,8 @@ rename can't silently drop one.
 Turns a design intent into a working HTML prototype built from the system's real classes and
 tokens — a fragment, not a page. Grounded in `ds_kit_classes` specifically because a plausible
 invention (`.pl-datepicker`) renders as an unstyled div: only classes the kit actually ships
-will look like anything. Told to compose an existing component when one covers the case, and to
-name the gap in a leading comment when none does.
+will look like anything. Told to compose an existing component when one covers the case, and to name the gap when
+none does — a named gap is a design-system finding, and worth more than a silent one-off.
 
 It **renders with `show_artifact`** and self-checks with `check_artifact` — the artifact plugin
 already gives sandboxed rendering, versioning, `update_artifact`/`rewrite_artifact` and a render
@@ -146,7 +147,7 @@ operator_mcp_tools:
 ```
 
 The allowlist is **deny-by-default**, so a foreign client gets only what you name (`"*"` exposes
-everything). All fourteen tools are MCP-safe — none are on the HITL incompatible list. The
+everything). All of the read tools are MCP-safe — none are on the HITL incompatible list. The
 tool docstrings are what the client sees as tool descriptions, which is why they read as
 instructions rather than summaries.
 
