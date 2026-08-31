@@ -150,8 +150,8 @@
      zero-min flex box, or `height: 100%` on .pg resolves against an auto-height block and
      collapses to content — which is what left the stage short with dead space under it. */
   body.pg-full .main { overflow: hidden; display: flex; flex-direction: column; padding: var(--pl-space-4); }
-  body.pg-full #playground, body.pg-full #design { flex: 1 1 auto; min-height: 0; display: flex; }
-  body.pg-full .pg, body.pg-full .dz { flex: 1 1 auto; }
+  body.pg-full #playground { flex: 1 1 auto; min-height: 0; display: flex; }
+  body.pg-full .pg { flex: 1 1 auto; }
   .pg { display: flex; gap: 0; height: 100%; min-height: 0; }
   .pg-main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
   .pg-bar {
@@ -209,74 +209,6 @@
     word-break: break-word; color: var(--pl-color-fg-muted);
     border: var(--pl-border-width) solid var(--pl-color-border);
   }
-  .ask { max-width: 820px; }
-  .ask textarea {
-    width: 100%; min-height: 84px; resize: vertical; font: inherit;
-    padding: var(--pl-space-3); border-radius: var(--pl-radius);
-    color: var(--pl-color-fg); background: var(--pl-color-bg-raised, #131316);
-    border: var(--pl-border-width) solid var(--pl-color-border);
-  }
-  .ask .row { display: flex; align-items: center; gap: var(--pl-space-3); margin-top: var(--pl-space-3); }
-  .ask .hint { color: var(--pl-color-fg-subtle); font-size: 12px; }
-  .ask .seeds { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--pl-space-3); }
-  .ask .seeds button {
-    font: inherit; font-size: 12px; cursor: pointer; text-align: left;
-    padding: 5px 10px; border-radius: var(--pl-radius);
-    color: var(--pl-color-fg-muted); background: var(--pl-color-bg-subtle);
-    border: var(--pl-border-width) solid var(--pl-color-border);
-  }
-  .ask .seeds button:hover { color: var(--pl-color-fg); border-color: var(--pl-color-accent); }
-  .answer {
-    margin-top: var(--pl-space-5); padding: var(--pl-space-4);
-    background: var(--pl-color-bg-raised, #131316); border-radius: var(--pl-radius);
-    border: var(--pl-border-width) solid var(--pl-color-border);
-    line-height: var(--pl-font-line-height-body);
-  }
-  .answer h4 { margin: var(--pl-space-4) 0 var(--pl-space-2); font-size: 13px; }
-  .answer h4:first-child { margin-top: 0; }
-  .answer code {
-    font-family: var(--pl-font-mono); font-size: 12px;
-    background: var(--pl-color-bg-inset, #060608); padding: 1px 5px; border-radius: 3px;
-  }
-  .answer a { color: var(--pl-color-accent-fg); }
-  .answer ul { margin: var(--pl-space-2) 0; padding-left: 1.2em; }
-  .answer li { margin: 3px 0; }
-  .answer p { margin: var(--pl-space-2) 0; }
-  .answer pre {
-    margin: var(--pl-space-3) 0; padding: var(--pl-space-3); overflow-x: auto;
-    background: var(--pl-color-bg-inset, #060608); border-radius: var(--pl-radius);
-    border: var(--pl-border-width) solid var(--pl-color-border);
-  }
-  .answer pre code { background: none; padding: 0; font-size: 12px; }
-  .dz { display: flex; flex-direction: column; gap: var(--pl-space-3); height: 100%; min-height: 0; }
-  .dz textarea {
-    width: 100%; min-height: 72px; resize: vertical; font: inherit;
-    padding: var(--pl-space-3); border-radius: var(--pl-radius);
-    color: var(--pl-color-fg); background: var(--pl-color-bg-raised, #131316);
-    border: var(--pl-border-width) solid var(--pl-color-border);
-  }
-  .dz .row { display: flex; align-items: center; gap: var(--pl-space-3); flex-wrap: wrap; }
-  .dz .hint { color: var(--pl-color-fg-subtle); font-size: 12px; }
-  .dz .split { flex: 1 1 auto; min-height: 0; display: flex; gap: var(--pl-space-4); }
-  .dz .preview {
-    flex: 1 1 auto; min-width: 0; position: relative; overflow: hidden;
-    background: var(--pl-color-bg-inset, #060608); border-radius: var(--pl-radius);
-    border: var(--pl-border-width) solid var(--pl-color-border);
-  }
-  .dz .preview iframe { width: 100%; height: 100%; border: 0; display: block; }
-  .dz .aside { flex: 0 0 340px; overflow-y: auto; display: none; }
-  .dz.reviewing .aside, .dz.reviewed .aside { display: block; }
-  .dz .aside h3 {
-    font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
-    color: var(--pl-color-fg-subtle); margin: 0 0 var(--pl-space-3);
-  }
-  .dz .srcwrap { max-height: 32vh; overflow: auto; }
-  .dz pre.src {
-    margin: 0; padding: var(--pl-space-3); font-family: var(--pl-font-mono); font-size: 11.5px;
-    white-space: pre-wrap; word-break: break-word; color: var(--pl-color-fg-muted);
-    background: var(--pl-color-bg-inset, #060608); border-radius: var(--pl-radius);
-    border: var(--pl-border-width) solid var(--pl-color-border);
-  }
   .status { color: var(--pl-color-fg-muted); padding: var(--pl-space-6); text-align: center; }
   .hide { display: none !important; }
   a.plain { color: var(--pl-color-accent-fg); text-decoration: none; font-size: 12px; }
@@ -291,8 +223,6 @@
       <button class="pl-tab pl-tab--active" data-tab="foundations" aria-pressed="true">Foundations</button>
       <button class="pl-tab" data-tab="components" aria-pressed="false">Components</button>
       <button class="pl-tab" data-tab="playground" aria-pressed="false">Playground</button>
-      <button class="pl-tab" data-tab="ask" aria-pressed="false">Ask</button>
-      <button class="pl-tab" data-tab="design" aria-pressed="false">Design</button>
     </div>
     <span class="grow"></span>
     <input class="pl-input" id="q" type="search" placeholder="Filter…" style="max-width:200px" />
@@ -307,8 +237,6 @@
       <section id="foundations" class="hide"></section>
       <section id="components" class="hide"></section>
       <section id="playground" class="hide"></section>
-      <section id="ask" class="hide"></section>
-      <section id="design" class="hide"></section>
     </main>
   </div>
 
@@ -695,236 +623,17 @@ function renderArgsCode() {
     : `<${name}${props} />`;
 }
 
-// ── ask ───────────────────────────────────────────────────────────────────────
-// The answer comes from the ds-explainer subagent, which is grounded in the same ds_* tools
-// the gallery reads — so "what does this system contain" is decided in ONE place, and the
-// pane can't drift from what the agent would tell you in chat.
-
-const SEEDS = [
-  "Which button variant should a destructive action use?",
-  "What is our spacing scale, and when do I use each step?",
-  "Do we already have a data table? What can it do?",
-  "How do I show a loading state consistently?",
-  "What's the difference between bg-raised, bg-subtle and bg-inset?",
-];
-
-let asking = false;
-
-// The answer is model-authored text, so it is ESCAPED first and only then given a few safe
-// inline forms. Never insert it as raw HTML.
-function miniMarkdown(text) {
-  const src = esc(text);
-  const lines = src.split(/\r?\n/);
-  let html = "", inList = false, fence = null, buf = [];
-
-  const inline = (t) => {
-    // Markdown links are resolved to placeholders FIRST so the bare-URL autolinker below
-    // can't re-linkify the href it just produced (which nested an <a> inside an <a> and
-    // left the label sitting outside as literal "[text](url)").
-    const held = [];
-    let out = t.replace(/\[([^\]]+)\]\((https?:[^\s)]+)\)/g, (_, label, url) => {
-      held.push(`<a href="${url}" target="_blank" rel="noopener">${label}</a>`);
-      return `\u0000${held.length - 1}\u0000`;
-    });
-    out = out
-      .replace(/`([^`]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (m, pre, url) => `${pre}<a href="${url}" target="_blank" rel="noopener">${url}</a>`);
-    return out.replace(/\u0000(\d+)\u0000/g, (_, i) => held[Number(i)]);
-  };
-
-  const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };
-
-  for (const raw of lines) {
-    const line = raw.trimEnd();
-    const f = /^\s*```(\w*)\s*$/.exec(line);
-    if (f) {
-      if (fence === null) { closeList(); fence = f[1]; buf = []; }
-      else { html += `<pre><code>${buf.join("\n")}</code></pre>`; fence = null; }
-      continue;
-    }
-    if (fence !== null) { buf.push(raw); continue; }
-
-    const li = /^\s*[-*]\s+(.*)$/.exec(line);
-    if (li) {
-      if (!inList) { html += "<ul>"; inList = true; }
-      html += `<li>${inline(li[1])}</li>`;
-      continue;
-    }
-    closeList();
-    const h = /^#{1,6}\s+(.*)$/.exec(line);
-    if (h) { html += `<h4>${inline(h[1])}</h4>`; continue; }
-    if (line.trim()) html += `<p>${inline(line)}</p>`;
-  }
-  closeList();
-  // An unterminated fence still has to render — the model can be cut off mid-block.
-  if (fence !== null && buf.length) html += `<pre><code>${buf.join("\n")}</code></pre>`;
-  return html;
-}
-
-window.__mm = miniMarkdown;   // test hook
-
-function renderAsk() {
-  const host = $("ask");
-  if (host.dataset.built) return;   // keep the question + answer across tab switches
-  host.dataset.built = "1";
-  host.innerHTML = `
-    <div class="ask">
-      <p class="lede">Ask about <strong>this</strong> design system. Answers are grounded in the
-        live tokens, rules and component inventory of <code>${esc(DATA.meta.repo)}</code> — not in
-        general design advice.</p>
-      <textarea id="ask-q" placeholder="Which component should I use for…"></textarea>
-      <div class="row">
-        <button class="pl-btn pl-btn--primary" id="ask-go">Ask</button>
-        <span class="hint" id="ask-hint">⌘/Ctrl + Enter</span>
-      </div>
-      <div class="seeds">${SEEDS.map((q) => `<button data-seed="${esc(q)}">${esc(q)}</button>`).join("")}</div>
-      <div id="ask-out"></div>
-    </div>`;
-}
-
-async function submitAsk() {
-  const q = $("ask-q").value.trim();
-  if (!q || asking) return;
-  asking = true;
-  $("ask-go").disabled = true;
-  $("ask-hint").textContent = "Reading the design system…";
-  $("ask-out").innerHTML = `<div class="answer"><span class="pl-spinner"></span> Working…</div>`;
-  try {
-    const res = await kit.apiFetch("/api/plugins/design-system/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: q }),
-    });
-    const data = await res.json().catch(() => ({}));
-    $("ask-out").innerHTML = data.ok
-      ? `<div class="answer">${miniMarkdown(data.answer || "(no answer)")}</div>`
-      : `<div class="pl-alert pl-alert--warning">${esc(data.error || `Ask failed (HTTP ${res.status}).`)}</div>`;
-  } catch (err) {
-    $("ask-out").innerHTML = `<div class="pl-alert pl-alert--error">${esc(String(err))}</div>`;
-  } finally {
-    asking = false;
-    $("ask-go").disabled = false;
-    $("ask-hint").textContent = "⌘/Ctrl + Enter";
-  }
-}
-
-// ── design ────────────────────────────────────────────────────────────────────
-// Prototypes render in a SANDBOXED srcdoc frame with the kit stylesheet applied — the same
-// no-build kit the design system publishes — so what you see uses the system's real classes
-// and the operator's live theme, not an approximation of them.
-
-const DESIGN_SEEDS = [
-  "An empty state for a project list with a primary action",
-  "A compact settings row with a label, description and a toggle",
-  "A confirmation dialog for a destructive action",
-];
-
-let designing = false;
-let lastDesign = "";
-
-function previewDoc(fragment) {
-  const kitHref = new URL("../../_ds/plugin-kit.css", location.href).href;
-  // Copy the operator's resolved theme in, or the prototype renders in the kit's default
-  // scheme while the console around it is in the other one.
-  const rootStyle = getComputedStyle(document.documentElement);
-  const vars = ["--pl-color-bg", "--pl-color-bg-raised", "--pl-color-fg", "--pl-color-accent"]
-    .map((v) => `${v}:${rootStyle.getPropertyValue(v).trim()}`).filter((d) => !d.endsWith(":")).join(";");
-  return `<!doctype html><html data-theme="${currentMode()}"><head><meta charset="utf-8">
-    <link rel="stylesheet" href="${kitHref}">
-    <style>:root{${vars}} body{margin:0;padding:24px;background:var(--pl-color-bg);color:var(--pl-color-fg);font-family:var(--pl-font-sans)}</style>
-    </head><body>${fragment}</body></html>`;
-}
-
-window.__pd = previewDoc;   // test hook
-
-function renderDesign() {
-  const host = $("design");
-  if (host.dataset.built) return;
-  host.dataset.built = "1";
-  host.innerHTML = `
-    <div class="dz" id="dz">
-      <textarea id="dz-q" placeholder="Describe a component, layout or styling idea…"></textarea>
-      <div class="row">
-        <button class="pl-btn pl-btn--primary" id="dz-go">Design it</button>
-        <button class="pl-btn pl-btn--sm" id="dz-critique" disabled>Critique</button>
-        <span class="hint" id="dz-hint">Built from this system's real classes and tokens</span>
-      </div>
-      <div class="row" id="dz-seeds">${DESIGN_SEEDS.map((q) => `<button class="pl-btn pl-btn--sm pl-btn--ghost" data-seed="${esc(q)}">${esc(q)}</button>`).join("")}</div>
-      <div class="split">
-        <div class="preview"><iframe id="dz-frame" title="Prototype preview" sandbox="allow-same-origin"></iframe></div>
-        <aside class="aside" id="dz-aside"></aside>
-      </div>
-      <div class="srcwrap" id="dz-srcwrap" hidden><pre class="src" id="dz-src"></pre></div>
-    </div>`;
-}
-
-async function submitDesign() {
-  const intent = $("dz-q").value.trim();
-  if (!intent || designing) return;
-  designing = true;
-  $("dz-go").disabled = true;
-  $("dz-hint").textContent = "Reading the system and building…";
-  try {
-    const res = await kit.apiFetch("/api/plugins/design-system/design", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ intent }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!data.ok) {
-      $("dz-hint").textContent = data.error || `Design failed (HTTP ${res.status}).`;
-      return;
-    }
-    lastDesign = data.html || "";
-    $("dz-frame").srcdoc = previewDoc(lastDesign);
-    $("dz-src").textContent = lastDesign;
-    $("dz-srcwrap").hidden = false;
-    $("dz-critique").disabled = false;
-    $("dz-hint").textContent = "Prototype built — Critique reviews it against the system.";
-  } finally {
-    designing = false;
-    $("dz-go").disabled = false;
-  }
-}
-
-async function submitCritique() {
-  if (!lastDesign) return;
-  const dz = $("dz");
-  dz.classList.add("reviewing");
-  $("dz-critique").disabled = true;
-  $("dz-aside").innerHTML = `<h3>Review</h3><div class="answer"><span class="pl-spinner"></span> Reviewing…</div>`;
-  try {
-    const res = await kit.apiFetch("/api/plugins/design-system/critique", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: lastDesign, intent: $("dz-q").value.trim() }),
-    });
-    const data = await res.json().catch(() => ({}));
-    $("dz-aside").innerHTML = `<h3>Review</h3>` + (data.ok
-      ? `<div class="answer">${miniMarkdown(data.review || "")}</div>`
-      : `<div class="pl-alert pl-alert--warning">${esc(data.error || `Critique failed (HTTP ${res.status}).`)}</div>`);
-    dz.classList.add("reviewed");
-  } finally {
-    $("dz-critique").disabled = false;
-  }
-}
-
 function render() {
   const f = $("q").value.trim();
   $("status").classList.add("hide");
   const isComp = tab === "components";
   const isPg = tab === "playground";
-  const isAsk = tab === "ask";
-  const isDesign = tab === "design";
-  document.body.classList.toggle("pg-full", isPg || isDesign);
-  $("foundations").classList.toggle("hide", isComp || isPg || isAsk || isDesign);
-  $("ask").classList.toggle("hide", !isAsk);
-  $("design").classList.toggle("hide", !isDesign);
+  document.body.classList.toggle("pg-full", isPg);
+  $("foundations").classList.toggle("hide", isComp || isPg);
   $("components").classList.toggle("hide", !isComp);
   $("playground").classList.toggle("hide", !isPg);
   // The component list drives the playground too, so the rail stays up for both.
   $("side").classList.toggle("hide", !isComp && !isPg);
-  if (isAsk) { renderAsk(); return; }
-  if (isDesign) { renderDesign(); return; }
   if (isPg) { renderSide(f); renderPlayground(); return; }
   if (isComp) {
     renderSide(f);
@@ -1032,23 +741,6 @@ $("foundations").addEventListener("click", async (e) => {
     meta.textContent = "copied ✓";
     setTimeout(() => { meta.textContent = was; }, 900);
   } catch { /* clipboard blocked in this frame; the name is on screen to copy by hand */ }
-});
-$("ask").addEventListener("click", (e) => {
-  if (e.target.closest("#ask-go")) { submitAsk(); return; }
-  const seed = e.target.closest("[data-seed]");
-  if (seed) { $("ask-q").value = seed.dataset.seed; submitAsk(); }
-});
-$("ask").addEventListener("keydown", (e) => {
-  if (e.target.id === "ask-q" && (e.metaKey || e.ctrlKey) && e.key === "Enter") submitAsk();
-});
-$("design").addEventListener("click", (e) => {
-  if (e.target.closest("#dz-go")) { submitDesign(); return; }
-  if (e.target.closest("#dz-critique")) { submitCritique(); return; }
-  const seed = e.target.closest("[data-seed]");
-  if (seed) { $("dz-q").value = seed.dataset.seed; submitDesign(); }
-});
-$("design").addEventListener("keydown", (e) => {
-  if (e.target.id === "dz-q" && (e.metaKey || e.ctrlKey) && e.key === "Enter") submitDesign();
 });
 $("q").addEventListener("input", () => { if (DATA) render(); });
 $("refresh").addEventListener("click", async () => {

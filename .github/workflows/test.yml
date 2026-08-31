@@ -1,0 +1,39 @@
+# The plugin's own gate. Runs host-free: the suite loads __init__.py by path with the two
+# GitHub fetch seams monkeypatched, so it needs neither a protoAgent checkout nor the network.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        # Only what the suite imports. langchain-core supplies the @tool decorator, fastapi the
+        # routers, pyyaml the manifest assertions, httpx the fetch seams' import.
+        run: pip install pytest langchain-core fastapi pyyaml httpx
+      - name: Tests
+        run: python -m pytest tests/ -q
+      - name: Manifest is parseable and versioned
+        run: |
+          python - <<'PY'
+          import pathlib, yaml
+          m = yaml.safe_load(pathlib.Path("protoagent.plugin.yaml").read_text())
+          assert m["id"] == "design-system", m["id"]
+          assert m["version"], "manifest carries no version"
+          # A view whose declared path no route serves is a blank iframe with no error.
+          for v in m.get("views") or []:
+              assert v["path"].startswith("/plugins/design-system"), v
+          print("manifest ok:", m["version"])
+          PY

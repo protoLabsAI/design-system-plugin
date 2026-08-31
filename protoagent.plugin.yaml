@@ -1,6 +1,6 @@
 id: design-system
 name: Design System
-version: 0.6.0
+version: 0.7.0
 description: >-
   The agent's live window into a design system. Reads the configured repo's design
   tokens, the packages/ui component inventory, and the visual-identity rules STRAIGHT FROM
@@ -46,4 +46,21 @@ capabilities:
 # Console view (ADR 0038) — the design-system explorer. The plugin serves its own page;
 # the console renders it in a sandboxed iframe, so there's no host build to keep in step.
 views:
-  - { id: design-system, label: "Design System", icon: "Component", placement: right, path: "/plugins/design-system/view" }
+  # `palette: inline` puts this view behind ⌘K without a second page to maintain — the
+  # palette morphs THIS page into its body rather than needing a compact variant.
+  - { id: design-system, label: "Design System", icon: "Component", placement: right, path: "/plugins/design-system/view", palette: inline }
+
+# Event bus (ADR 0039) — broadcast, so consumers subscribe by topic instead of this plugin
+# knowing who they are. Emitted by ds_drift (and so by the recurring drift watch).
+emits:
+  - topic: design-system.drift-detected
+    summary: "The design system moved — tokens changed and/or components were added/removed."
+    payload:
+      repo: string
+      ref: string
+      tokens_changed: boolean
+      components_added: string[]
+      components_removed: string[]
+subscribes: []
+
+# skills/ auto-loads — the agent-facing contract for using the ds_* tools together.
