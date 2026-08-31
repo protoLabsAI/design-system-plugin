@@ -643,3 +643,105 @@ def test_gallery_keeps_its_own_scrolling():
     still scroll, so .main stays a scroll container everywhere else."""
     html = _view_html()
     assert ".main { flex: 1 1 auto; overflow-y: auto;" in html
+
+
+# ── ask (ds-explainer) ────────────────────────────────────────────────────────
+
+
+def _ask_endpoint():
+    return next(r for r in ds._build_data_router().routes if r.path == "/ask").endpoint
+
+
+def _call_ask(body):
+    import asyncio
+
+    return asyncio.run(_ask_endpoint()(body))
+
+
+@pytest.mark.parametrize("body", [{}, {"question": "   "}, None])
+def test_ask_rejects_an_empty_question(body):
+    out = _call_ask(body)
+    assert out["ok"] is False and "Ask a question" in out["error"]
+
+
+def test_ask_rejects_an_oversized_question():
+    out = _call_ask({"question": "x" * 2001})
+    assert out["ok"] is False and "too long" in out["error"]
+
+
+def test_ask_injects_the_plugins_own_tools(monkeypatch):
+    """REGRESSION: a subagent resolves its allowlist against the LEAD agent's bound tool map,
+    which a plugin route plays no part in building — so without injecting them explicitly the
+    call degrades to 'No tools available for subagent', with nothing saying why."""
+    seen = {}
+
+    async def fake(subagent_type, prompt, *, description, extra_tools=None, **kw):
+        seen.update(type=subagent_type, prompt=prompt, tools=[t.name for t in (extra_tools or [])])
+        return "answer"
+
+    import sys, types
+    mod = types.ModuleType("graph.sdk")
+    mod.run_subagent = fake
+    monkeypatch.setitem(sys.modules, "graph.sdk", mod)
+
+    out = _call_ask({"question": "which button for delete?"})
+    assert out["ok"] is True and out["answer"] == "answer"
+    assert seen["type"] == "ds-explainer"
+    assert seen["tools"], "no tools injected — the subagent would report 'No tools available'"
+    assert {"ds_rules", "ds_tokens", "ds_stories"} <= set(seen["tools"])
+
+
+def test_explainer_allowlist_is_derived_from_the_injected_tools():
+    """One source: the allowlist can't drift from what the route actually injects."""
+    import sys, types
+
+    stub = types.ModuleType("graph.subagents.config")
+
+    class SubagentConfig:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    stub.SubagentConfig = SubagentConfig
+    pkg = types.ModuleType("graph.subagents")
+    pkg.config = stub
+    sys.modules.setdefault("graph", types.ModuleType("graph"))
+    sys.modules["graph.subagents"] = pkg
+    sys.modules["graph.subagents.config"] = stub
+
+    cfg = ds._build_explainer()
+    assert cfg.name == "ds-explainer"
+    assert cfg.tools == [t.name for t in ds._explainer_tools()]
+
+
+def test_ask_surfaces_a_failure_instead_of_500ing(monkeypatch):
+    import sys, types
+
+    async def boom(*a, **kw):
+        raise RuntimeError("gateway down")
+
+    mod = types.ModuleType("graph.sdk")
+    mod.run_subagent = boom
+    monkeypatch.setitem(sys.modules, "graph.sdk", mod)
+    out = _call_ask({"question": "anything"})
+    assert out["ok"] is False and "gateway down" in out["error"]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("[ds-explainer completed: Answer a design-system question]\n\nUse Button.", "Use Button."),
+        ("No banner here.", "No banner here."),
+        ("[craft completed: x] body", "body"),
+    ],
+)
+def test_subagent_banner_is_stripped(raw, expected):
+    """The dispatcher banner names which delegate answered — noise in a pane that only ever
+    shows this one."""
+    assert ds._strip_subagent_banner(raw) == expected
+
+
+def test_answer_is_escaped_before_formatting():
+    """The answer is model-authored; it must be escaped and only then given inline forms."""
+    html = _view_html()
+    assert "const src = esc(text);" in html
+    assert "Never insert it as raw HTML" in html

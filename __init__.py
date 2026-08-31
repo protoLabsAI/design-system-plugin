@@ -452,6 +452,60 @@ def _build_design_critic():
     )
 
 
+_EXPLAINER_PROMPT = """You are the **design-system explainer** — you answer questions about THIS design
+system, grounded in what it actually contains right now.
+
+You are not a general design consultant. Every claim you make must come from a tool call in this
+turn, because the system changes and your training data is not it:
+- `ds_rules` — the visual-identity rules: when to use what, and what we don't do. The judgment layer.
+- `ds_tokens` — the live `--pl-*` vocabulary, with dark and light values.
+- `ds_stories` — every component and every variant the published Storybook ships.
+- `ds_story <name>` — one component's variants, each with a live preview URL.
+- `ds_component <name>` — a component's story SOURCE, for props and real usage.
+- `ds_check <code>` — whether a snippet hardcodes a value a token already defines.
+
+How to answer:
+- **Lead with the answer.** A sentence or two, then the evidence. No preamble.
+- **Name the real thing** — the exact token (`var(--pl-color-status-error)`), the exact component
+  and variant (`Button`, `variant="danger"`). A name you didn't read from a tool is a guess; don't
+  offer it.
+- **Prefer what exists.** If the system already ships something for this, say so and point at it.
+  Reinventing a component the system has is the most common and most expensive mistake here.
+- **Say when it doesn't cover this.** "The system has no X yet" is a genuinely useful answer, and far
+  better than inventing a plausible-sounding token or variant. If a reasonable extension exists,
+  describe it as a proposal and label it as one.
+- **Link a preview when it helps.** `ds_story` gives you a live URL per variant; a reader can click it.
+- Be concise. Markdown, short sections, no padding. If the question is ambiguous, answer the most
+  likely reading and note the other briefly rather than asking and stalling."""
+
+
+# The explainer's toolset, as objects. ONE source: the subagent's allowlist is derived from
+# it, and the ask route injects the same list as `extra_tools`. Two reasons that matters:
+# a subagent resolves its allowlist against the LEAD agent's bound tool map, which a plugin
+# route has no part in building — so relying on the host having bound these degrades to
+# "No tools available for subagent" with nothing explaining why. And deriving the names
+# means the allowlist can never drift from what is actually injected.
+def _explainer_tools() -> list:
+    return [ds_rules, ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_check]
+
+
+def _build_explainer():
+    from graph.subagents.config import SubagentConfig
+
+    return SubagentConfig(
+        name="ds-explainer",
+        description=(
+            "Answers a question about the design system — which component or token to use, what a "
+            "variant is for, whether the system covers a case — grounded in the LIVE tokens, rules "
+            "and component inventory rather than from memory. Use for 'what should I use for…' / "
+            "'do we have a…' / 'what's our … scale' questions."
+        ),
+        system_prompt=_EXPLAINER_PROMPT,
+        tools=[t.name for t in _explainer_tools()],
+        max_turns=12,
+    )
+
+
 _WATCH_PROMPT = (
     "Design-system drift check. Call `ds_drift` to see what changed in @protolabsai/design and "
     "packages/ui since your last review. If tokens changed or components were added/removed, "
@@ -577,6 +631,18 @@ def _build_view_router():
     return router
 
 
+_BANNER_RE = re.compile(r"^\s*\[[^\]\n]*\bcompleted\b[^\]\n]*\]\s*", re.I)
+
+
+def _strip_subagent_banner(text: str) -> str:
+    """Drop the dispatcher's ``[<name> completed: <description>]`` prefix.
+
+    That banner is for a chat transcript, where it says which delegate answered. In a pane
+    that only ever shows this one subagent it is noise sitting above every answer.
+    """
+    return _BANNER_RE.sub("", text or "", count=1).strip()
+
+
 def _build_data_router():
     from fastapi import APIRouter
 
@@ -620,6 +686,33 @@ def _build_data_router():
             out["components_error"] = str(e)
         return out
 
+    @router.post("/ask")
+    async def ask(body: dict) -> dict:
+        """Answer a question about the design system, grounded in the live system.
+
+        Delegates to the ds-explainer subagent rather than answering from the route, so the
+        answer is produced by the same grounded reasoning the agent uses in chat — one place
+        where "what does this system actually contain" is decided.
+        """
+        question = str((body or {}).get("question") or "").strip()
+        if not question:
+            return {"ok": False, "error": "Ask a question about the design system."}
+        if len(question) > 2000:
+            return {"ok": False, "error": "That question is too long — trim it to 2000 characters."}
+        try:
+            from graph.sdk import run_subagent
+
+            answer = await run_subagent(
+                "ds-explainer",
+                question,
+                description="Answer a design-system question",
+                extra_tools=_explainer_tools(),
+            )
+        except Exception as exc:  # noqa: BLE001 — surface the cause in the pane, don't 500
+            log.exception("[design-system] ask failed")
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "answer": _strip_subagent_banner(answer)}
+
     @router.post("/refresh")
     def refresh() -> dict:
         """Drop the Storybook cache so a DS deploy shows up without waiting out the TTL."""
@@ -644,10 +737,11 @@ def register(registry) -> None:
 
     # design-critic subagent (ADR 0018) — reviews a prototype/component against the LIVE DS + a11y,
     # grounded via the ds_* tools above. The lead delegates to it with `task("design-critic", …)`.
-    try:
-        registry.register_subagent(_build_design_critic())
-    except Exception:  # noqa: BLE001 — a subagent-registry hiccup must not break plugin load
-        log.exception("[design-system] failed to register the design-critic subagent")
+    for build in (_build_design_critic, _build_explainer):
+        try:
+            registry.register_subagent(build())
+        except Exception:  # noqa: BLE001 — a registry hiccup must not break plugin load
+            log.exception("[design-system] failed to register a subagent (%s)", build.__name__)
 
     # Arm the drift watch (native scheduler, ADR 0050) — owned by this plugin, so a disable/
     # uninstall cancels it; idempotent by job_id, so a reload re-arms cleanly.
@@ -662,4 +756,4 @@ def register(registry) -> None:
         except Exception:  # noqa: BLE001 — a scheduler hiccup must never break plugin load
             log.exception("[design-system] failed to arm the drift watch")
 
-    log.info("[design-system] registered 12 tools + design-critic subagent (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
+    log.info("[design-system] registered 12 tools + design-critic/ds-explainer subagents (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
