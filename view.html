@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Design System</title>
+<!-- RELATIVE, deliberately: the kit lives at <base>/_ds/ where <base> is "" in the host
+     window and "/agents/<slug>" under the fleet proxy. "../../" resolves correctly in BOTH
+     from this page's own path, which a root-absolute "/_ds/..." would not. Kept in the HTML
+     rather than assigned from JS so the browser starts the fetch during parse and blocks
+     the first paint on it — an href filled in by script means the page paints once with NO
+     --pl-* tokens defined, i.e. white. (Depth is coupled to the view path; a test asserts it.) -->
+<link rel="stylesheet" href="../../_ds/plugin-kit.css" id="ds-kit" />
+<style>
+  /* Bootstrap ground — applies before the kit stylesheet resolves and whenever it can't.
+     The literals are the ONLY hardcoded colours in this file and exist purely so an
+     unstyled first paint lands on the right ground instead of white; the tokens win the
+     moment they exist. Follows the OS scheme, since the console's theme only arrives later
+     over the handshake. */
+  :root { color-scheme: dark; }
+  html { background: var(--pl-color-bg, #0a0a0c); }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; }
+    html { background: var(--pl-color-bg, #f6f7f9); }
+  }
+  html, body { height: 100%; }
+  body {
+    margin: 0; display: flex; flex-direction: column;
+    font-family: var(--pl-font-sans); font-size: var(--pl-font-base-size);
+    color: var(--pl-color-fg); background: var(--pl-color-bg, transparent);
+  }
+  .bar {
+    display: flex; align-items: center; gap: var(--pl-space-3);
+    padding: var(--pl-space-3) var(--pl-space-4);
+    border-bottom: var(--pl-border-width) solid var(--pl-color-border);
+    background: var(--pl-color-bg-raised); flex: 0 0 auto; flex-wrap: wrap;
+  }
+  .bar h1 { font-size: 15px; font-weight: var(--pl-font-weight-semibold); margin: 0; }
+  .src { color: var(--pl-color-fg-subtle); font-family: var(--pl-font-mono); font-size: 12px; }
+  .grow { flex: 1 1 auto; }
+  .body { flex: 1 1 auto; min-height: 0; display: flex; }
+  .side {
+    flex: 0 0 216px; overflow-y: auto; padding: var(--pl-space-3) 0;
+    border-right: var(--pl-border-width) solid var(--pl-color-border);
+    background: var(--pl-color-bg-raised);
+  }
+  .side .grp {
+    padding: var(--pl-space-3) var(--pl-space-4) var(--pl-space-1);
+    font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--pl-color-fg-subtle);
+  }
+  .side button {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    padding: 6px var(--pl-space-4); border: 0; background: none;
+    color: var(--pl-color-fg-muted); font: inherit;
+    border-left: 2px solid transparent;
+  }
+  .side button:hover { background: var(--pl-color-bg-hover); color: var(--pl-color-fg); }
+  .side button[aria-current="true"] {
+    color: var(--pl-color-fg); background: var(--pl-color-bg-subtle);
+    border-left-color: var(--pl-color-accent);
+  }
+  .side .count { color: var(--pl-color-fg-subtle); font-size: 11px; }
+  .main { flex: 1 1 auto; overflow-y: auto; padding: var(--pl-space-5); min-width: 0; }
+  .lede { color: var(--pl-color-fg-muted); margin: 0 0 var(--pl-space-5); max-width: 62ch; }
+  h2.sec {
+    font-size: 12px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--pl-color-fg-subtle); font-weight: var(--pl-font-weight-semibold);
+    margin: var(--pl-space-6) 0 var(--pl-space-3);
+    padding-bottom: var(--pl-space-2);
+    border-bottom: var(--pl-border-width) solid var(--pl-color-border);
+  }
+  h2.sec:first-child { margin-top: 0; }
+  .comp-head { margin: 0 0 var(--pl-space-4); }
+  .comp-head .eyebrow {
+    font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--pl-color-fg-subtle);
+  }
+  .comp-head h2 { font-size: 18px; margin: 2px 0 0; font-weight: var(--pl-font-weight-semibold); }
+  .comp-head .count { font-weight: 400; color: var(--pl-color-fg-subtle); font-size: 13px; }
+
+  .toks { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: var(--pl-space-3); }
+  .tok {
+    display: flex; gap: var(--pl-space-3); align-items: center; cursor: pointer;
+    padding: var(--pl-space-2); border-radius: var(--pl-radius); border: 0;
+    background: var(--pl-color-bg-raised); text-align: left; width: 100%;
+    color: inherit; font: inherit;
+  }
+  .tok:hover { background: var(--pl-color-bg-hover); }
+  .tok .meta { min-width: 0; flex: 1 1 auto; }
+  .tok .nm {
+    font-family: var(--pl-font-mono); font-size: 11.5px; color: var(--pl-color-fg);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tok .vl { font-family: var(--pl-font-mono); font-size: 11px; color: var(--pl-color-fg-subtle); }
+  .chip {
+    flex: 0 0 auto; width: 44px; height: 34px; border-radius: var(--pl-radius);
+    border: var(--pl-border-width) solid var(--pl-color-border-strong);
+    display: grid; place-items: center; overflow: hidden;
+  }
+  .chip.split { position: relative; }
+  .chip.split i { position: absolute; inset: 0; }
+  .chip.split i.l { clip-path: polygon(0 0, 100% 0, 0 100%); }
+  .bararea { height: 10px; background: var(--pl-color-accent); border-radius: 2px; }
+  .swatchrow { display: flex; align-items: center; gap: var(--pl-space-2); }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr)); gap: var(--pl-space-4); }
+  .card {
+    border: var(--pl-border-width) solid var(--pl-color-border);
+    border-radius: var(--pl-radius); overflow: hidden; background: var(--pl-color-bg-raised);
+    display: flex; flex-direction: column;
+  }
+  .card header {
+    display: flex; align-items: center; gap: var(--pl-space-2);
+    padding: var(--pl-space-2) var(--pl-space-3);
+    border-bottom: var(--pl-border-width) solid var(--pl-color-border);
+  }
+  .card header .nm { font-weight: var(--pl-font-weight-medium); font-size: 12.5px; }
+  /* The frame WELL owns the height and the ground colour. The iframe is cross-origin, so
+     we can't style its document — before its CSS lands the browser paints that document's
+     default canvas WHITE, which is the flash. Two defences, both from outside the frame:
+     `color-scheme` below (so the pre-CSS canvas is painted in our mode, not white), and
+     holding the frame hidden over a themed skeleton until it has actually painted. */
+  .well { position: relative; height: 180px; background: var(--pl-color-bg-raised, #131316); }
+  .card.tall .well { height: 560px; }
+  body.big .well, body.big .card.tall .well { height: 560px; }
+  .well iframe {
+    width: 100%; height: 100%; border: 0; display: block;
+    background: var(--pl-color-bg-raised, #131316);
+    /* Paints the embedded document's initial canvas in our scheme instead of white. */
+    color-scheme: dark;
+    opacity: 0;
+  }
+  body.lightmode .well iframe { color-scheme: light; }
+  .card.ready .well iframe { opacity: 1; }
+  .well .skel {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    background: var(--pl-color-bg-raised, #131316); pointer-events: none;
+  }
+  .card.ready .well .skel { display: none; }
+  .well .skel span {
+    width: 42%; height: 10px; border-radius: 999px;
+    background: var(--pl-color-bg-subtle);
+    animation: pulse var(--pl-motion-loading, 1000ms) ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: .45 } 50% { opacity: .9 } }
+  @media (prefers-reduced-motion: reduce) { .well .skel span { animation: none } }
+  .status { color: var(--pl-color-fg-muted); padding: var(--pl-space-6); text-align: center; }
+  .hide { display: none !important; }
+  a.plain { color: var(--pl-color-accent-fg); text-decoration: none; font-size: 12px; }
+  a.plain:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <h1>Design System</h1>
+    <span class="src" id="src"></span>
+    <div class="pl-tabs pl-tabs--segmented" role="group" id="tabs">
+      <button class="pl-tab pl-tab--active" data-tab="foundations" aria-pressed="true">Foundations</button>
+      <button class="pl-tab" data-tab="components" aria-pressed="false">Components</button>
+    </div>
+    <span class="grow"></span>
+    <input class="pl-input" id="q" type="search" placeholder="Filter…" style="max-width:200px" />
+    <label class="pl-check" style="display:flex;gap:6px;align-items:center;font-size:12px;color:var(--pl-color-fg-muted)">
+      <input type="checkbox" id="big" /> Large</label>
+    <button class="pl-btn pl-btn--sm" id="refresh" title="Re-read the design system">Refresh</button>
+    <a class="plain" id="sblink" target="_blank" rel="noopener"></a>
+  </div>
+
+  <div class="body">
+    <nav class="side hide" id="side"></nav>
+    <main class="main">
+      <div class="status" id="status">Reading the design system…</div>
+      <section id="foundations" class="hide"></section>
+      <section id="components" class="hide"></section>
+    </main>
+  </div>
+
+<script type="module">
+// Rule 3: derive the base so this works behind the /agents/<slug>/ fleet proxy too.
+const base = location.pathname.split("/plugins/")[0];
+// NOTE: the kit STYLESHEET is linked statically in the head (see the comment there) — do
+// not set its href from here, or the fetch restarts and the page paints untokenised first.
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let kit;
+try {
+  // plugin-kit.js is an ES module AND the URL is slug-dependent, so it must be a dynamic
+  // import — a classic <script src> throws "Unexpected token 'export'" and never runs.
+  kit = await import(base + "/_ds/plugin-kit.js");
+  // The callback fires on the initial handshake AND on every live operator re-theme,
+  // so the story frames follow the console instead of freezing at load-time theme.
+  kit.initPluginView(() => { syncMode(); if (DATA && tab === "components") renderComponent(); });
+} catch (err) {
+  // Fail loudly: the bearer arrives THROUGH the kit handshake, so a bare-fetch fallback
+  // could only 401 and would blame auth for a missing /_ds bundle.
+  $("status").textContent = "Could not load the design-system kit (" + base + "/_ds/plugin-kit.js): " + err;
+  throw err;
+}
+
+let DATA = null, active = null, tab = "foundations";
+
+// The console hands the kit a CURATED palette ({bg, fg, brand, …}), not a mode name — so
+// read the mode back off the token the kit actually applied. Rendering each story in the
+// operator's own theme is the point: a gallery stuck in dark while the console is light
+// is how a contrast bug stays invisible until someone ships it.
+function currentMode() {
+  const bg = getComputedStyle(document.documentElement).getPropertyValue("--pl-color-bg").trim();
+  const m = bg.match(/^#([0-9a-f]{3,8})$/i);
+  let lum = 0;
+  if (m) {
+    let h = m[1];
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const [r, g, b] = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+    lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  } else {
+    const nums = bg.match(/[\d.]+/g);
+    if (nums && nums.length >= 3) {
+      const [r, g, b] = nums.slice(0, 3).map(Number);
+      lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+    }
+  }
+  return lum > 0.5 ? "light" : "dark";
+}
+
+const themed = (url) => url + "&globals=theme:" + currentMode();
+
+// Mirror the resolved mode onto <body> so `color-scheme` on the frames matches it. Without
+// this the embedded document's pre-CSS canvas is painted in the WRONG scheme — still a
+// flash, just a dark one on a light console.
+function syncMode() {
+  document.body.classList.toggle("lightmode", currentMode() === "light");
+}
+
+// Storybook is a CLIENT-RENDERED preview: `load` fires when the iframe document has
+// finished loading, but the story CSS is injected by its JS afterwards, so between `load`
+// and the first story paint the document is a blank WHITE page. Revealing on `load`
+// therefore shows that white — measured at ~290ms of it (load 391ms, storyRendered 683ms).
+//
+// So we reveal on Storybook's OWN render event, which it posts to us over its
+// `storybook-channel` postMessage protocol. `load` only starts a grace timer, so a
+// Storybook that doesn't speak the protocol still resolves instead of pulsing forever.
+const SB_DONE = new Set([
+  "storyRendered", "storyFinished", "storyMissing", "storyErrored", "storyThrewException",
+]);
+const GRACE_AFTER_LOAD_MS = 2500;
+const FRAME_TIMEOUT_MS = 12000;
+
+function markReady(frame) {
+  const card = frame && frame.closest(".card");
+  if (card) card.classList.add("ready");
+}
+
+// One listener for the whole page; each message is matched back to its frame by source
+// window. Registered once — re-registering per render would leak a listener per switch.
+window.addEventListener("message", (e) => {
+  const origin = DATA && DATA.meta && DATA.meta.storybook_url;
+  if (!origin || e.origin !== new URL(origin).origin) return;   // only our Storybook
+  let d = e.data;
+  if (typeof d === "string") { try { d = JSON.parse(d); } catch { return; } }
+  if (!d || d.key !== "storybook-channel" || !d.event || !SB_DONE.has(d.event.type)) return;
+  for (const frame of document.querySelectorAll("#components .well iframe")) {
+    if (frame.contentWindow === e.source) { markReady(frame); return; }
+  }
+});
+
+function revealFramesIn(host) {
+  for (const frame of host.querySelectorAll(".well iframe")) {
+    // Not a reveal on its own — just bounds how long we wait for storyRendered.
+    frame.addEventListener("load", () => setTimeout(() => markReady(frame), GRACE_AFTER_LOAD_MS), { once: true });
+    frame.addEventListener("error", () => markReady(frame), { once: true });
+    setTimeout(() => markReady(frame), FRAME_TIMEOUT_MS);
+  }
+}
+
+// Stories that lay out a whole screen need room; a 180px card crops them into nonsense.
+const TALL = /app ?shell|full|conversation|thread|splash|palette|blog|mobile|rail|dock/i;
+
+function tokenChip(t) {
+  const dark = esc(t.value), light = esc(t.light);
+  if (t.kind === "color" || t.kind === "gradient") {
+    return t.themed
+      // Themed tokens get a split chip: the pair is what you actually judge, and a
+      // single-theme swatch is how contrast regressions ship unnoticed.
+      ? `<span class="chip split" title="dark / light"><i style="background:${dark}"></i><i class="l" style="background:${light}"></i></span>`
+      : `<span class="chip" style="background:${dark}"></span>`;
+  }
+  if (t.kind === "shadow") return `<span class="chip" style="box-shadow:${dark};background:var(--pl-color-bg-subtle)"></span>`;
+  if (t.kind === "font") return `<span class="chip" style="font-family:${dark};font-size:15px">Ag</span>`;
+  if (t.kind === "length") {
+    const px = Math.min(parseFloat(t.value) || 0, 40);
+    return `<span class="chip"><span class="bararea" style="width:${Math.max(px, 2)}px"></span></span>`;
+  }
+  if (t.kind === "duration") return `<span class="chip" style="font-size:10px;color:var(--pl-color-fg-subtle)">${dark}</span>`;
+  return `<span class="chip" style="font-size:10px;color:var(--pl-color-fg-subtle)">—</span>`;
+}
+
+function renderFoundations(filter) {
+  const host = $("foundations");
+  if (DATA.tokens_error) {
+    host.innerHTML = `<div class="pl-alert pl-alert--warning">Tokens unavailable — ${esc(DATA.tokens_error)}</div>`;
+    return;
+  }
+  const f = (filter || "").toLowerCase();
+  let html = `<p class="lede">The live token vocabulary from <code>${esc(DATA.meta.repo)}</code>.
+    These are the only values to style with — click any token to copy its <code>var()</code>.</p>`;
+  let shown = 0;
+  for (const sec of DATA.tokens) {
+    const toks = sec.tokens.filter((t) => !f || t.name.includes(f) || String(t.value).toLowerCase().includes(f));
+    if (!toks.length) continue;
+    shown += toks.length;
+    html += `<h2 class="sec">${esc(sec.section)} <span class="count">${toks.length}</span></h2><div class="toks">`;
+    for (const t of toks) {
+      html += `<button class="tok" data-copy="var(${esc(t.var)})" title="Copy var(${esc(t.var)})">
+        ${tokenChip(t)}
+        <span class="meta"><span class="nm">${esc(t.name)}</span><br />
+        <span class="vl">${esc(t.value)}${t.themed ? " · " + esc(t.light) : ""}</span></span></button>`;
+    }
+    html += `</div>`;
+  }
+  host.innerHTML = shown ? html : `<div class="status">No tokens match that filter.</div>`;
+}
+
+function renderSide(filter) {
+  const f = (filter || "").toLowerCase();
+  let html = "";
+  for (const g of DATA.groups) {
+    // Match VARIANT names too: people search for the thing they saw ("toast", "skeleton"),
+    // which is often a story under a broader component ("Overlays"), not a component name.
+    const comps = g.components.filter((c) => !f
+      || c.title.toLowerCase().includes(f)
+      || c.stories.some((s) => s.name.toLowerCase().includes(f)));
+    if (!comps.length) continue;
+    if (g.group) html += `<div class="grp">${esc(g.group.replace(/^Components\/?/, "") || "Components")}</div>`;
+    for (const c of comps) {
+      html += `<button data-comp="${esc(c.title)}" aria-current="${c.title === active}">
+        ${esc(c.label)} <span class="count">${c.stories.length}</span></button>`;
+    }
+  }
+  $("side").innerHTML = html || `<div class="grp">No matches</div>`;
+}
+
+function renderComponent() {
+  const host = $("components");
+  if (DATA.components_error) {
+    host.innerHTML = `<div class="pl-alert pl-alert--warning">Gallery unavailable — ${esc(DATA.components_error)}
+      <br />Set the published Storybook URL in Settings ▸ Plugins ▸ Design System.</div>`;
+    return;
+  }
+  const comp = DATA.groups.flatMap((g) => g.components).find((c) => c.title === active);
+  if (!comp) { host.innerHTML = `<div class="status">Pick a component.</div>`; return; }
+  const grp = comp.group.replace(/^Components\/?/, "");
+  let html = `<div class="comp-head">${grp ? `<div class="eyebrow">${esc(grp)}</div>` : ""}
+    <h2>${esc(comp.label)} <span class="count">${comp.stories.length} variant${comp.stories.length === 1 ? "" : "s"}</span></h2></div>`;
+  if (!comp.stories.length) html += `<div class="status">This entry has docs but no rendered stories.</div>`;
+  html += `<div class="cards">`;
+  for (const s of comp.stories) {
+    const tall = TALL.test(s.name) || TALL.test(comp.label) ? " tall" : "";
+    html += `<div class="card${tall}"><header><span class="nm">${esc(s.name)}</span>
+      <span class="grow" style="flex:1"></span>
+      <a class="plain" href="${esc(s.docs)}" target="_blank" rel="noopener">Storybook ↗</a></header>
+      <div class="well"><div class="skel"><span></span></div>
+      <iframe loading="lazy" title="${esc(comp.label)} — ${esc(s.name)}" src="${esc(themed(s.preview))}"></iframe></div></div>`;
+  }
+  host.innerHTML = html + `</div>`;
+  revealFramesIn(host);
+}
+
+function render() {
+  const f = $("q").value.trim();
+  $("status").classList.add("hide");
+  const isComp = tab === "components";
+  $("foundations").classList.toggle("hide", isComp);
+  $("components").classList.toggle("hide", !isComp);
+  $("side").classList.toggle("hide", !isComp);
+  if (isComp) {
+    renderSide(f);
+    // A filter that hides the selected component would otherwise strand the pane on
+    // something the sidebar no longer offers a way back to.
+    if (f && !document.querySelector(`#side [data-comp="${CSS.escape(active || "")}"]`)) {
+      const first = document.querySelector("#side [data-comp]");
+      if (first) active = first.dataset.comp;
+      renderSide(f);
+    }
+    renderComponent();
+  } else { renderFoundations(f); }
+}
+
+async function load() {
+  syncMode();
+  const res = await kit.apiFetch("/api/plugins/design-system/catalog");
+  if (!res.ok) { $("status").textContent = `Could not read the catalog (HTTP ${res.status}).`; return; }
+  DATA = await res.json();
+  $("src").textContent = `${DATA.meta.repo}@${DATA.meta.ref}`;
+  const sb = DATA.meta.storybook_url;
+  if (sb) { $("sblink").href = sb; $("sblink").textContent = "Storybook ↗"; }
+  const all = DATA.groups.flatMap((g) => g.components);
+  active = active || (all.find((c) => c.label === "Button") || all[0] || {}).title || null;
+  render();
+}
+
+$("tabs").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-tab]"); if (!b) return;
+  tab = b.dataset.tab;
+  for (const t of $("tabs").children) {
+    const on = t === b;
+    t.classList.toggle("pl-tab--active", on);
+    t.setAttribute("aria-pressed", String(on));
+  }
+  render();
+});
+$("side").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-comp]"); if (!b) return;
+  active = b.dataset.comp; render();
+});
+$("foundations").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-copy]"); if (!b) return;
+  try {
+    await navigator.clipboard.writeText(b.dataset.copy);
+    const meta = b.querySelector(".vl"), was = meta.textContent;
+    meta.textContent = "copied ✓";
+    setTimeout(() => { meta.textContent = was; }, 900);
+  } catch { /* clipboard blocked in this frame; the name is on screen to copy by hand */ }
+});
+$("big").addEventListener("change", (e) => {
+  document.body.classList.toggle("big", e.target.checked);
+});
+$("q").addEventListener("input", () => { if (DATA) render(); });
+$("refresh").addEventListener("click", async () => {
+  $("refresh").disabled = true;
+  try { await kit.apiFetch("/api/plugins/design-system/refresh", { method: "POST" }); await load(); }
+  finally { $("refresh").disabled = false; }
+});
+
+await load();
+</script>
+</body>
+</html>

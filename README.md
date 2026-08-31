@@ -18,12 +18,37 @@ from the repo at call time** — the anti-drift principle, as tools.
 
 | Tool | What it returns |
 |---|---|
-| `ds_tokens` | the live token vocabulary (colors, spacing, radius, type…) — read before writing any styling |
-| `ds_components` | the component inventory from `packages/ui/src` (the Storybook stories) |
-| `ds_component <name>` | one component's story — its variants, API, usage |
+| `ds_tokens` | the live token vocabulary — every `--pl-*` var with its dark and light value, read from the generated `tokens.css` |
+| `ds_components` | the component inventory from `packages/ui/src` (the story files) |
+| `ds_component <name>` | one component's story SOURCE — its API, props, usage |
+| `ds_stories` | the published Storybook inventory: every component and every variant name |
+| `ds_story <name>` | one component's variants, each with a **live render URL** you can show the user |
 | `ds_rules` | the visual-identity rules (when to use what, what we don't do) |
 | `ds_check <css\|jsx>` | flags a hardcoded hex a token already defines → the token to use instead |
 | `ds_drift` | what changed since the last check (tokens + components); updates a snapshot |
+
+## The explorer — a Storybook that the agent can read
+
+The plugin serves a console view (**Design System** in the right rail) with two panes:
+
+- **Foundations** — the live token vocabulary as swatches, type specimens, spacing rules and
+  motion values. Themed tokens render as a split chip showing the dark and light face together,
+  because the *pair* is what you actually judge; click any token to copy its `var()`.
+- **Components** — the gallery, one card per variant.
+
+**The gallery renders the design system's own published Storybook**, not a replica. The inventory
+comes from `index.json` and each card is an `<iframe>` onto that Storybook's `/iframe?id=<story>`.
+So what an operator browses is the real library at its current deploy — a plugin whose whole
+purpose is preventing drift has no business maintaining a second copy of the components. It also
+means the taxonomy in the sidebar is the design system's *own* (Foundations, Primitives, Layout,
+Navigation…), inherited rather than imposed.
+
+Story frames are rendered in the operator's current console theme (passed through as Storybook's
+`theme` global), so a gallery never sits in dark while the console is in light — which is how a
+contrast regression stays invisible until someone ships it.
+
+Point `storybook_url` at any published Storybook. Leave it blank and the gallery turns off; the
+token, rules and lint tools keep working, so a design system without a Storybook is still usable.
 
 ## `design-critic` subagent
 
@@ -50,11 +75,20 @@ The watch is plugin-owned, so a disable/uninstall cancels it; it re-arms idempot
 design-system:
   repo: protoLabsAI/protoContent
   ref: main
-  tokens_path: packages/design-system/dist/tokens.json   # committed built JSON
+  tokens_path: packages/design-system/dist/tokens.json   # committed built JSON (fallback)
+  tokens_css_path: packages/design-system/dist/tokens.css  # generated --pl-* vars (the contract)
   components_path: packages/ui/src
   rules_path: docs/reference/visual-identity.md
+  storybook_url: https://protocontent-storybook.pages.dev   # "" = gallery off
   watch_cron: "0 14 * * *"   # "" = watch off
 ```
+
+`tokens_css_path` is read in preference to `tokens_path` because the **generated CSS is the
+contract**: consumers write `var(--pl-color-brand-lavender)`, and that name is produced by the
+DS's own build. Re-deriving the camelCase→kebab rule here would mean maintaining a second copy of
+it, and a token name this plugin invents but the design system doesn't publish is worse than no
+name at all. The JSON holds the values; the CSS holds the names. A repo with no built CSS falls
+back to the JSON automatically.
 
 Auth: the GitHub contents API is read with `GITHUB_TOKEN` / `GH_TOKEN` from the env (the same
 token the `github` plugin uses; protoContent is private). No separate plugin secret.

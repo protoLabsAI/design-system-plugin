@@ -10,7 +10,9 @@ vocabulary — never a stale copy frozen into its knowledge base (the anti-drift
 Tools:
   ds_tokens      — the live token vocabulary (colors, spacing, radius, type, …)
   ds_components  — the component inventory (packages/ui)
-  ds_component   — one component's Storybook story (variants / API / usage)
+  ds_component   — one component's Storybook story SOURCE (the API / usage / props)
+  ds_stories     — the published Storybook inventory: every component and every variant
+  ds_story       — one component's variants + a LIVE render URL per variant
   ds_rules       — the visual-identity rules (when to use what, what we don't do)
   ds_check       — lint code: flag hardcoded hex a token already defines
   ds_drift       — what changed since the last check (tokens + components); updates a snapshot
@@ -40,9 +42,15 @@ _DEFAULTS = {
     "repo": "protoLabsAI/protoContent",
     "ref": "main",
     "tokens_path": "packages/design-system/dist/tokens.json",
+    # The GENERATED css — the authoritative --pl-* var names. ds_tokens prefers this over
+    # the JSON because a var name is what a consumer writes; the JSON only has token paths.
+    "tokens_css_path": "packages/design-system/dist/tokens.css",
     "components_path": "packages/ui/src",
     "rules_path": "docs/reference/visual-identity.md",
     "watch_cron": "0 14 * * *",
+    # Root URL of the DS's published Storybook. Blank = the gallery + story tools are off
+    # (the token/rules/lint tools all still work — a DS without a Storybook stays usable).
+    "storybook_url": "https://protocontent-storybook.pages.dev",
 }
 # Register-time config snapshot (populated from registry.config in register(); rebuilt on a
 # config reload). Process-local — each fleet member runs its own server process.
@@ -131,17 +139,25 @@ def _component_names(entries: list[dict]) -> list[str]:
 
 @tool
 def ds_tokens() -> str:
-    """Return the LIVE design tokens from the configured DS repo — the current source-of-truth vocabulary
-    (colors, spacing, radius, typography, …) from @protolabsai/design. Read this before writing
-    ANY styling; never hardcode a value a token already defines. Fetched live from the repo."""
+    """The LIVE design-token vocabulary — every ``--pl-*`` custom property with its dark and
+    light value. This is the vocabulary you must write styling in: never hardcode a color,
+    space, radius, or duration that appears here; use ``var(--pl-…)``. Fetched live from the
+    configured repo, so it reflects the system as it is now, not as it was."""
     try:
-        raw = _gh_get_raw(_cfg("tokens_path"))
+        return (
+            "Live design tokens — write var(--pl-…), never the literal:\n"
+            + _tokens_mod().summarize(_token_sections())
+        )
     except RuntimeError as e:
-        return f"ds_tokens error: {e}"
-    try:
-        return "Live design tokens (@protolabsai/design) — use these, never a literal:\n" + json.dumps(json.loads(raw), indent=1)
-    except json.JSONDecodeError:
-        return raw  # not JSON (e.g. a src fallback) — hand the raw file to the agent
+        # A DS that doesn't publish a built CSS still has the source values worth reading.
+        try:
+            raw = _gh_get_raw(_cfg("tokens_path"))
+        except RuntimeError:
+            return f"ds_tokens error: {e}"
+        try:
+            return f"({e} — falling back to the raw token source)\nLive design tokens:\n" + json.dumps(json.loads(raw), indent=1)
+        except json.JSONDecodeError:
+            return raw
 
 
 @tool
@@ -178,6 +194,121 @@ def ds_rules() -> str:
         return _gh_get_raw(_cfg("rules_path"))
     except RuntimeError as e:
         return f"ds_rules error: {e}"
+
+
+# ── token vocabulary (from the generated CSS) ─────────────────────────────────
+
+_TOKENS_MOD = None
+
+
+def _tokens_mod():
+    global _TOKENS_MOD
+    if _TOKENS_MOD is None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("design_system_tokens", Path(__file__).resolve().parent / "tokens.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _TOKENS_MOD = mod
+    return _TOKENS_MOD
+
+
+def _token_sections() -> list[dict]:
+    """Live token vocabulary as ordered, renderable sections. Raises ``RuntimeError``."""
+    tk = _tokens_mod()
+    themes = tk.parse_css(_gh_get_raw(_cfg("tokens_css_path")))
+    if not themes["dark"]:
+        raise RuntimeError(f"no --pl-* custom properties found in {_cfg('tokens_css_path')}")
+    return tk.group_tokens(themes["dark"], themes["light"])
+
+
+# ── Storybook bridge ──────────────────────────────────────────────────────────
+# A DS that publishes a Storybook already curates the inventory this plugin would
+# otherwise reinvent: every component, every variant, each with a live render. We read
+# that instead of maintaining a replica — a replica is exactly the drift this plugin exists
+# to prevent. Pure parsing lives in storybook.py; the fetch + tool surface is here.
+
+_SB_MOD = None
+_SB_CACHE: tuple[float, list[dict]] | None = None  # (fetched_at, components)
+_SB_TTL = 300.0  # the index moves on DS deploys, not per-turn; a 5-min cache is plenty
+
+
+def _sb_mod():
+    global _SB_MOD
+    if _SB_MOD is None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("design_system_storybook", Path(__file__).resolve().parent / "storybook.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _SB_MOD = mod
+    return _SB_MOD
+
+
+def _sb_components(force: bool = False) -> list[dict]:
+    """Parsed component inventory from the published ``index.json``, TTL-cached.
+
+    Raises ``RuntimeError`` with a legible cause; callers turn it into an error string.
+    """
+    global _SB_CACHE
+    import time
+
+    base = _sb_mod().normalize_base(_cfg("storybook_url"))
+    if not base:
+        raise RuntimeError("no storybook_url configured — set it in Settings ▸ Plugins ▸ Design System")
+    if not force and _SB_CACHE and (time.time() - _SB_CACHE[0]) < _SB_TTL:
+        return _SB_CACHE[1]
+
+    import httpx
+
+    try:
+        r = httpx.get(f"{base}/index.json", headers={"User-Agent": "protoagent-design-system"}, follow_redirects=True, timeout=20.0)
+        r.raise_for_status()
+        index = r.json()
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"could not fetch the Storybook index from {base} ({type(e).__name__})") from e
+    except ValueError as e:
+        raise RuntimeError(f"{base}/index.json is not JSON — is storybook_url the Storybook ROOT?") from e
+
+    comps = _sb_mod().parse_index(index)
+    _SB_CACHE = (time.time(), comps)
+    return comps
+
+
+@tool
+def ds_stories() -> str:
+    """The design system's published Storybook inventory — every component and the NAME of
+    every variant, grouped by the system's own taxonomy. Read this to find out what already
+    exists before proposing anything new; reinventing a component the system already ships is
+    the most common design-system mistake. Use ds_story for one component's live previews."""
+    try:
+        return "Design-system Storybook inventory (live):\n" + _sb_mod().summarize(_sb_components())
+    except RuntimeError as e:
+        return f"ds_stories error: {e}"
+
+
+@tool
+def ds_story(name: str) -> str:
+    """One component's variants, each with a LIVE preview URL you can show the user — e.g.
+    'Button', 'Overlays', 'Components/Layout/Grid'. Cheap and pointable: it returns the
+    variant list and render URLs, NOT the source. Use ds_component for the story SOURCE
+    (props / API / usage) when you need to read or change the implementation."""
+    try:
+        comps = _sb_components()
+    except RuntimeError as e:
+        return f"ds_story error: {e}"
+    sb = _sb_mod()
+    comp = sb.find_component(comps, name)
+    if not comp:
+        return f"ds_story: no component matching {name!r}. Use ds_stories for the inventory."
+    base = _cfg("storybook_url")
+    lines = [f"{comp['title']} — {len(comp['stories'])} variant(s)"]
+    if comp.get("import_path"):
+        lines.append(f"source: {comp['import_path']}  (read it with ds_component)")
+    for s in comp["stories"]:
+        lines.append(f"- {s['name']}: {sb.preview_url(base, s['id'])}")
+    lines.append(f"open in Storybook: {sb.docs_url(base, comp['stories'][0]['id'])}" if comp["stories"] else "")
+    return "\n".join(x for x in lines if x)
 
 
 _HEX_RE = re.compile(r"#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b")
@@ -425,13 +556,91 @@ def theme_apply(overrides_json: str, mode: str = "dark") -> str:
         return f"Error: persisting theme failed — {exc}"
 
 
+# ── console view: the design-system explorer ──────────────────────────────────
+# The gallery renders the DS's OWN published Storybook (one iframe per story), so what an
+# operator browses here is the real library at its current commit — not a replica this
+# plugin maintains. Two routers at distinct prefixes: the PAGE is public (an iframe
+# navigation can't carry a bearer), the DATA is gated.
+
+
+def _build_view_router():
+    from fastapi import APIRouter
+    from fastapi.responses import HTMLResponse
+
+    router = APIRouter()
+    page = Path(__file__).resolve().parent / "view.html"
+
+    @router.get("/view", include_in_schema=False)
+    def view() -> HTMLResponse:
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    return router
+
+
+def _build_data_router():
+    from fastapi import APIRouter
+
+    router = APIRouter()
+
+    @router.get("/catalog")
+    def catalog() -> dict:
+        """Everything the explorer renders, in one round trip.
+
+        Tokens and stories come from different origins (the repo vs. the published
+        Storybook) and fail independently, so each half carries its OWN error rather than
+        failing the whole payload — a DS with no Storybook should still browse its tokens,
+        and vice versa.
+        """
+        sb = _sb_mod()
+        out: dict = {
+            "meta": {
+                "repo": _cfg("repo"),
+                "ref": _cfg("ref"),
+                "storybook_url": sb.normalize_base(_cfg("storybook_url")),
+                "rules_path": _cfg("rules_path"),
+            },
+            "tokens": [],
+            "tokens_error": None,
+            "groups": [],
+            "components_error": None,
+        }
+        try:
+            out["tokens"] = _token_sections()
+        except RuntimeError as e:
+            out["tokens_error"] = str(e)
+        try:
+            comps = _sb_components()
+            base = _cfg("storybook_url")
+            for comp in comps:
+                for s in comp["stories"]:
+                    s["preview"] = sb.preview_url(base, s["id"])
+                    s["docs"] = sb.docs_url(base, s["id"])
+            out["groups"] = sb.group_tree(comps)
+        except RuntimeError as e:
+            out["components_error"] = str(e)
+        return out
+
+    @router.post("/refresh")
+    def refresh() -> dict:
+        """Drop the Storybook cache so a DS deploy shows up without waiting out the TTL."""
+        global _SB_CACHE
+        _SB_CACHE = None
+        return {"ok": True}
+
+    return router
+
+
 def register(registry) -> None:
     cfg = registry.config or {}
     for k in _DEFAULTS:
         v = cfg.get(k)
         if v not in (None, ""):
             _CFG[k] = str(v)
-    registry.register_tools([ds_tokens, ds_components, ds_component, ds_rules, ds_check, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply])
+    # View PAGE: public /plugins/design-system (ungated) — iframe nav carries no bearer.
+    registry.register_router(_build_view_router(), prefix="/plugins/design-system")
+    # DATA: gated /api/plugins/design-system — fetched with the handshake token.
+    registry.register_router(_build_data_router(), prefix="/api/plugins/design-system")
+    registry.register_tools([ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_rules, ds_check, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply])
 
     # design-critic subagent (ADR 0018) — reviews a prototype/component against the LIVE DS + a11y,
     # grounded via the ds_* tools above. The lead delegates to it with `task("design-critic", …)`.
@@ -453,4 +662,4 @@ def register(registry) -> None:
         except Exception:  # noqa: BLE001 — a scheduler hiccup must never break plugin load
             log.exception("[design-system] failed to arm the drift watch")
 
-    log.info("[design-system] registered 10 tools + design-critic subagent (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
+    log.info("[design-system] registered 12 tools + design-critic subagent (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
