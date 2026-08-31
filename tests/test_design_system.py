@@ -571,3 +571,56 @@ def test_frames_reveal_on_storybook_render_not_on_load():
 def test_message_listener_checks_the_origin():
     """postMessage is receivable by anyone; only our configured Storybook may flip a card."""
     assert "e.origin !== new URL(origin).origin" in _view_html()
+
+
+# ── playground pane ───────────────────────────────────────────────────────────
+
+
+def test_cards_have_one_height_and_no_size_toggle():
+    """Large is the default; the header control and the tall/compact tiers are gone."""
+    html = _view_html()
+    assert ".well { position: relative; height: 560px" in html
+    assert 'id="big"' not in html and "body.big" not in html
+    assert "card.tall" not in html and "const TALL" not in html
+
+
+def test_playground_tab_exists():
+    html = _view_html()
+    assert 'data-tab="playground"' in html
+    assert 'id="playground"' in html
+
+
+def test_playground_drives_the_real_story_over_storybooks_channel():
+    """Controls manipulate the live component through the same message Storybook's own
+    manager sends — not a reimplementation of its rendering."""
+    html = _view_html()
+    assert '"updateStoryArgs"' in html
+    assert '"resetStoryArgs"' in html
+    assert '"updateGlobals"' in html
+    assert 'd.event.type === "storyPrepared"' in html or '"storyPrepared"' in html
+
+
+def test_playground_posts_to_the_storybook_origin_not_a_wildcard():
+    """postMessage with "*" would leak the payload to whatever document is framed."""
+    html = _view_html()
+    assert "new URL(DATA.meta.storybook_url).origin," in html
+    assert '"*"' not in html, "a wildcard targetOrigin would post to whatever is framed"
+
+
+def test_width_and_theme_do_not_rerender_the_playground():
+    """REGRESSION: re-rendering recreates the iframe, which reloads the story and silently
+    discards every arg the user set — so checking a state at mobile width lost the state."""
+    html = _view_html()
+    click = html[html.index('$("playground").addEventListener("click"'):html.index('$("playground").addEventListener("input"')]
+    width_branch = click[click.index('#pg-width'):click.index('#pg-theme')]
+    assert "renderPlayground()" not in width_branch
+    theme_branch = click[click.index('const t = e.target.closest("#pg-theme'):click.index("resetStoryArgs")]
+    assert "renderPlayground()" not in theme_branch
+
+
+def test_telejson_duplicate_markers_are_resolved_not_spread():
+    """Storybook dedupes repeated structures into `_duplicate_["path"]` STRINGS. Spreading
+    one as an object yields a char map, which rendered `<Button 0="_" 1="d" …>`."""
+    html = _view_html()
+    assert "_duplicate_" in html and "function undup(" in html
+    assert "isPlainObject(live) ? live : prep.initialArgs" in html

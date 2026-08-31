@@ -121,9 +121,7 @@
      default canvas WHITE, which is the flash. Two defences, both from outside the frame:
      `color-scheme` below (so the pre-CSS canvas is painted in our mode, not white), and
      holding the frame hidden over a themed skeleton until it has actually painted. */
-  .well { position: relative; height: 180px; background: var(--pl-color-bg-raised, #131316); }
-  .card.tall .well { height: 560px; }
-  body.big .well, body.big .card.tall .well { height: 560px; }
+  .well { position: relative; height: 560px; background: var(--pl-color-bg-raised, #131316); }
   .well iframe {
     width: 100%; height: 100%; border: 0; display: block;
     background: var(--pl-color-bg-raised, #131316);
@@ -145,6 +143,66 @@
   }
   @keyframes pulse { 0%, 100% { opacity: .45 } 50% { opacity: .9 } }
   @media (prefers-reduced-motion: reduce) { .well .skel span { animation: none } }
+  /* Playground — a full-size stage plus controls generated from the story's own argTypes.
+     Storybook hands us those over its channel, so the panel always matches the real
+     component API rather than a schema we'd have to keep in step by hand. */
+  .pg { display: flex; gap: 0; height: 100%; min-height: 0; }
+  .pg-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+  .pg-bar {
+    display: flex; align-items: center; gap: var(--pl-space-3); flex-wrap: wrap;
+    padding: 0 0 var(--pl-space-3);
+  }
+  .pg-bar .sp { flex: 1 1 auto; }
+  .pg-stage {
+    flex: 1 1 auto; min-height: 320px; display: flex; justify-content: center;
+    overflow: auto; padding: var(--pl-space-3);
+    background: var(--pl-color-bg-inset, #060608);
+    border: var(--pl-border-width) solid var(--pl-color-border);
+    border-radius: var(--pl-radius);
+  }
+  .pg-frame {
+    position: relative; width: 100%; height: 100%; min-height: 300px;
+    background: var(--pl-color-bg-raised, #131316);
+    border-radius: var(--pl-radius); overflow: hidden;
+    transition: width var(--pl-motion-base, 200ms) ease;
+  }
+  .pg-frame iframe { width: 100%; height: 100%; border: 0; display: block; color-scheme: dark; opacity: 0; }
+  body.lightmode .pg-frame iframe { color-scheme: light; }
+  .pg-frame.ready iframe { opacity: 1; }
+  .pg-frame .skel { position: absolute; inset: 0; display: grid; place-items: center;
+    background: var(--pl-color-bg-raised, #131316); pointer-events: none; }
+  .pg-frame.ready .skel { display: none; }
+  .pg-panel {
+    flex: 0 0 288px; overflow-y: auto; padding: 0 0 0 var(--pl-space-4);
+    margin-left: var(--pl-space-4);
+    border-left: var(--pl-border-width) solid var(--pl-color-border);
+  }
+  .pg-panel h3 {
+    font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--pl-color-fg-subtle); margin: 0 0 var(--pl-space-3);
+  }
+  .ctl { margin-bottom: var(--pl-space-4); }
+  .ctl label { display: block; font-size: 12px; margin-bottom: 4px; color: var(--pl-color-fg-muted); }
+  .ctl label code { color: var(--pl-color-fg); font-size: 11.5px; }
+  .ctl .pl-input, .ctl .pl-select, .ctl select, .ctl input[type="text"], .ctl input[type="number"] { width: 100%; }
+  .ctl .segbtns { display: flex; flex-wrap: wrap; gap: 4px; }
+  .ctl .segbtns button {
+    font: inherit; font-size: 12px; cursor: pointer; padding: 3px 9px;
+    border-radius: var(--pl-radius); color: var(--pl-color-fg-muted);
+    background: var(--pl-color-bg-subtle);
+    border: var(--pl-border-width) solid var(--pl-color-border);
+  }
+  .ctl .segbtns button[aria-pressed="true"] {
+    color: var(--pl-color-fg); border-color: var(--pl-color-accent);
+    background: var(--pl-color-bg-hover);
+  }
+  .pg-code {
+    margin-top: var(--pl-space-4); padding: var(--pl-space-3);
+    background: var(--pl-color-bg-inset, #060608); border-radius: var(--pl-radius);
+    font-family: var(--pl-font-mono); font-size: 11.5px; white-space: pre-wrap;
+    word-break: break-word; color: var(--pl-color-fg-muted);
+    border: var(--pl-border-width) solid var(--pl-color-border);
+  }
   .status { color: var(--pl-color-fg-muted); padding: var(--pl-space-6); text-align: center; }
   .hide { display: none !important; }
   a.plain { color: var(--pl-color-accent-fg); text-decoration: none; font-size: 12px; }
@@ -158,11 +216,10 @@
     <div class="pl-tabs pl-tabs--segmented" role="group" id="tabs">
       <button class="pl-tab pl-tab--active" data-tab="foundations" aria-pressed="true">Foundations</button>
       <button class="pl-tab" data-tab="components" aria-pressed="false">Components</button>
+      <button class="pl-tab" data-tab="playground" aria-pressed="false">Playground</button>
     </div>
     <span class="grow"></span>
     <input class="pl-input" id="q" type="search" placeholder="Filter…" style="max-width:200px" />
-    <label class="pl-check" style="display:flex;gap:6px;align-items:center;font-size:12px;color:var(--pl-color-fg-muted)">
-      <input type="checkbox" id="big" /> Large</label>
     <button class="pl-btn pl-btn--sm" id="refresh" title="Re-read the design system">Refresh</button>
     <a class="plain" id="sblink" target="_blank" rel="noopener"></a>
   </div>
@@ -173,6 +230,7 @@
       <div class="status" id="status">Reading the design system…</div>
       <section id="foundations" class="hide"></section>
       <section id="components" class="hide"></section>
+      <section id="playground" class="hide"></section>
     </main>
   </div>
 
@@ -193,7 +251,12 @@ try {
   kit = await import(base + "/_ds/plugin-kit.js");
   // The callback fires on the initial handshake AND on every live operator re-theme,
   // so the story frames follow the console instead of freezing at load-time theme.
-  kit.initPluginView(() => { syncMode(); if (DATA && tab === "components") renderComponent(); });
+  kit.initPluginView(() => {
+    syncMode();
+    if (!DATA) return;
+    if (tab === "components") renderComponent();
+    else if (tab === "playground" && PG.theme === "auto") sendToStory("updateGlobals", { globals: { theme: pgMode() } });
+  });
 } catch (err) {
   // Fail loudly: the bearer arrives THROUGH the kit handshake, so a bare-fetch fallback
   // could only 401 and would blame auth for a missing /_ds bundle.
@@ -261,7 +324,30 @@ window.addEventListener("message", (e) => {
   if (!origin || e.origin !== new URL(origin).origin) return;   // only our Storybook
   let d = e.data;
   if (typeof d === "string") { try { d = JSON.parse(d); } catch { return; } }
-  if (!d || d.key !== "storybook-channel" || !d.event || !SB_DONE.has(d.event.type)) return;
+  if (!d || d.key !== "storybook-channel" || !d.event) return;
+  const { type, args } = d.event;
+
+  // The playground's own frame: capture the story's real control schema when Storybook
+  // announces it, and keep our mirror of the args in step with what it actually applied.
+  const pgFrame = document.querySelector("#playground .pg-frame iframe");
+  if (pgFrame && pgFrame.contentWindow === e.source) {
+    if (type === "storyPrepared" && args && args[0]) {
+      const prep = args[0];
+      prep.argTypes = undup(prep.argTypes, d) || {};
+      prep.initialArgs = undup(prep.initialArgs, d) || {};
+      const live = undup(prep.args, d);
+      PG.prepared = prep;
+      PG.args = { ...(isPlainObject(live) ? live : prep.initialArgs) };
+      renderControls();
+    }
+    if (type === "storyArgsUpdated" && args && args[0]) {
+      const next = undup(args[0].args, d);
+      if (isPlainObject(next)) { PG.args = { ...next }; renderArgsCode(); }
+    }
+    if (SB_DONE.has(type)) pgFrame.closest(".pg-frame").classList.add("ready");
+  }
+
+  if (!SB_DONE.has(type)) return;
   for (const frame of document.querySelectorAll("#components .well iframe")) {
     if (frame.contentWindow === e.source) { markReady(frame); return; }
   }
@@ -275,9 +361,6 @@ function revealFramesIn(host) {
     setTimeout(() => markReady(frame), FRAME_TIMEOUT_MS);
   }
 }
-
-// Stories that lay out a whole screen need room; a 180px card crops them into nonsense.
-const TALL = /app ?shell|full|conversation|thread|splash|palette|blog|mobile|rail|dock/i;
 
 function tokenChip(t) {
   const dark = esc(t.value), light = esc(t.light);
@@ -358,8 +441,7 @@ function renderComponent() {
   if (!comp.stories.length) html += `<div class="status">This entry has docs but no rendered stories.</div>`;
   html += `<div class="cards">`;
   for (const s of comp.stories) {
-    const tall = TALL.test(s.name) || TALL.test(comp.label) ? " tall" : "";
-    html += `<div class="card${tall}"><header><span class="nm">${esc(s.name)}</span>
+    html += `<div class="card"><header><span class="nm">${esc(s.name)}</span>
       <span class="grow" style="flex:1"></span>
       <a class="plain" href="${esc(s.docs)}" target="_blank" rel="noopener">Storybook ↗</a></header>
       <div class="well"><div class="skel"><span></span></div>
@@ -369,13 +451,183 @@ function renderComponent() {
   revealFramesIn(host);
 }
 
+// ── playground ────────────────────────────────────────────────────────────────
+// Storybook drives its own preview through a postMessage channel; `updateStoryArgs` is the
+// same message its manager UI sends. So the controls here manipulate the REAL component
+// live — no reload, no reimplementation of its rendering.
+
+const PG = { storyId: null, prepared: null, args: {}, width: "fill", theme: "auto" };
+
+// Storybook serialises its channel with telejson, which replaces any structure that already
+// appeared in the message with a marker string: `_duplicate_["event","args","0","initialArgs"]`
+// — a PATH back to the original. Spreading one of those as an object yields a char map
+// (`{0:"_",1:"d",…}`), which is how the props panel first rendered `<Button 0="_" 1="d" …>`.
+// Resolve the path against the whole message instead.
+const DUP = /^_duplicate_(\[.*\])$/;
+function undup(value, root, seen = 0) {
+  if (typeof value !== "string" || seen > 4) return value;
+  const m = DUP.exec(value);
+  if (!m) return value;
+  let path;
+  try { path = JSON.parse(m[1]); } catch { return undefined; }
+  let node = root;
+  for (const key of path) {
+    if (node == null) return undefined;
+    node = node[key];
+  }
+  return undup(node, root, seen + 1);   // a marker may point at another marker
+}
+
+const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+
+const WIDTHS = [
+  { id: "fill", label: "Fill", css: "100%" },
+  { id: "desktop", label: "1280", css: "1280px" },
+  { id: "tablet", label: "768", css: "768px" },
+  { id: "mobile", label: "390", css: "390px" },
+];
+
+function pgMode() {
+  return PG.theme === "auto" ? currentMode() : PG.theme;
+}
+
+function pgStories() {
+  return DATA ? DATA.groups.flatMap((g) => g.components).flatMap((c) => c.stories.map((s) => ({ ...s, comp: c }))) : [];
+}
+
+function sendToStory(type, payload) {
+  const frame = document.querySelector("#playground .pg-frame iframe");
+  if (!frame || !frame.contentWindow) return;
+  frame.contentWindow.postMessage(
+    JSON.stringify({ key: "storybook-channel", event: { type, args: [payload], from: "manager" } }),
+    new URL(DATA.meta.storybook_url).origin,
+  );
+}
+
+function setArg(name, value) {
+  PG.args[name] = value;
+  sendToStory("updateStoryArgs", { storyId: PG.storyId, updatedArgs: { [name]: value } });
+  renderArgsCode();
+}
+
+function renderPlayground() {
+  const host = $("playground");
+  if (DATA.components_error) {
+    host.innerHTML = `<div class="pl-alert pl-alert--warning">Playground unavailable — ${esc(DATA.components_error)}</div>`;
+    return;
+  }
+  const all = pgStories();
+  if (!all.length) { host.innerHTML = `<div class="status">No stories to play with.</div>`; return; }
+  const comp = DATA.groups.flatMap((g) => g.components).find((c) => c.title === active) || all[0].comp;
+  if (!comp.stories.some((s) => s.id === PG.storyId)) PG.storyId = (comp.stories[0] || {}).id || null;
+  const story = comp.stories.find((s) => s.id === PG.storyId);
+  if (!story) { host.innerHTML = `<div class="status">This entry has no rendered stories.</div>`; return; }
+
+  const w = WIDTHS.find((x) => x.id === PG.width) || WIDTHS[0];
+  host.innerHTML = `
+    <div class="pg">
+      <div class="pg-main">
+        <div class="comp-head">${comp.group ? `<div class="eyebrow">${esc(comp.group.replace(/^Components\/?/, ""))}</div>` : ""}
+          <h2>${esc(comp.label)}</h2></div>
+        <div class="pg-bar">
+          <select class="pl-select" id="pg-variant" aria-label="Variant">
+            ${comp.stories.map((s) => `<option value="${esc(s.id)}"${s.id === PG.storyId ? " selected" : ""}>${esc(s.name)}</option>`).join("")}
+          </select>
+          <div class="segbtns" id="pg-width" role="group" aria-label="Preview width">
+            ${WIDTHS.map((x) => `<button data-w="${x.id}" aria-pressed="${x.id === PG.width}">${x.label}</button>`).join("")}
+          </div>
+          <div class="segbtns" id="pg-theme" role="group" aria-label="Preview theme">
+            ${["auto", "dark", "light"].map((t) => `<button data-t="${t}" aria-pressed="${t === PG.theme}">${t}</button>`).join("")}
+          </div>
+          <span class="sp"></span>
+          <a class="plain" href="${esc(story.docs)}" target="_blank" rel="noopener">Storybook ↗</a>
+        </div>
+        <div class="pg-stage">
+          <div class="pg-frame" style="width:${w.css};max-width:100%">
+            <div class="skel"><span></span></div>
+            <iframe title="${esc(comp.label)} playground"
+              src="${esc(story.preview)}&globals=theme:${esc(pgMode())}"></iframe>
+          </div>
+        </div>
+      </div>
+      <aside class="pg-panel">
+        <h3>Controls</h3>
+        <div id="pg-controls"><div class="status" style="padding:var(--pl-space-4)">Waiting for the story…</div></div>
+        <button class="pl-btn pl-btn--sm" id="pg-reset">Reset to story defaults</button>
+        <div class="pg-code" id="pg-code"></div>
+      </aside>
+    </div>`;
+}
+
+function renderControls() {
+  const host = $("pg-controls");
+  if (!host) return;
+  const types = (PG.prepared && PG.prepared.argTypes) || {};
+  // Storybook's channel dedupes repeated structures into "_duplicate_[…]" strings, so a
+  // value that should be an array can arrive as one. Anything we can't read as a real
+  // control degrades to a text field rather than rendering a broken widget.
+  const opts = (t) => {
+    for (const cand of [t.options, t.type && t.type.value]) {
+      if (Array.isArray(cand)) return cand;
+    }
+    return null;
+  };
+  const rows = Object.entries(types).filter(([, t]) => t && t.control && t.control.disable !== true);
+  if (!rows.length) { host.innerHTML = `<div class="status" style="padding:var(--pl-space-3)">This story exposes no controls.</div>`; return; }
+
+  let html = "";
+  for (const [name, t] of rows) {
+    const kind = (t.control && t.control.type) || "text";
+    const cur = PG.args[name];
+    const id = "c_" + name.replace(/[^a-zA-Z0-9_]/g, "_");
+    html += `<div class="ctl"><label for="${id}"><code>${esc(name)}</code></label>`;
+    const choices = opts(t);
+    if (kind === "boolean") {
+      html += `<input type="checkbox" id="${id}" data-arg="${esc(name)}" data-kind="boolean"${cur ? " checked" : ""} />`;
+    } else if (choices) {
+      html += `<div class="segbtns" data-arg="${esc(name)}" data-kind="choice">` +
+        choices.map((o) => `<button data-v="${esc(String(o))}" aria-pressed="${String(o) === String(cur)}">${esc(String(o))}</button>`).join("") + `</div>`;
+    } else if (kind === "number" || kind === "range") {
+      html += `<input class="pl-input" type="number" id="${id}" data-arg="${esc(name)}" data-kind="number" value="${esc(cur ?? "")}" />`;
+    } else if (kind === "color") {
+      html += `<input type="color" id="${id}" data-arg="${esc(name)}" data-kind="text" value="${esc(cur || "#000000")}" />`;
+    } else if (typeof cur === "object" && cur !== null) {
+      html += `<div class="status" style="padding:4px 0;text-align:left">object — edit in Storybook</div>`;
+    } else {
+      html += `<input class="pl-input" type="text" id="${id}" data-arg="${esc(name)}" data-kind="text" value="${esc(cur ?? "")}" />`;
+    }
+    html += `</div>`;
+  }
+  host.innerHTML = html;
+  renderArgsCode();
+}
+
+function renderArgsCode() {
+  const el = $("pg-code");
+  if (!el || !PG.prepared) return;
+  const comp = DATA.groups.flatMap((g) => g.components).find((c) => c.stories.some((s) => s.id === PG.storyId));
+  const name = comp ? comp.label.replace(/\s+/g, "") : "Component";
+  const entries = Object.entries(PG.args).filter(([k, v]) => v !== undefined && v !== "" && k !== "children");
+  const props = entries.map(([k, v]) =>
+    typeof v === "boolean" ? (v ? ` ${k}` : ` ${k}={false}`) :
+    typeof v === "number" ? ` ${k}={${v}}` : ` ${k}="${String(v)}"`).join("");
+  const kids = PG.args.children;
+  el.textContent = typeof kids === "string" && kids
+    ? `<${name}${props}>${kids}</${name}>`
+    : `<${name}${props} />`;
+}
+
 function render() {
   const f = $("q").value.trim();
   $("status").classList.add("hide");
   const isComp = tab === "components";
-  $("foundations").classList.toggle("hide", isComp);
+  const isPg = tab === "playground";
+  $("foundations").classList.toggle("hide", isComp || isPg);
   $("components").classList.toggle("hide", !isComp);
-  $("side").classList.toggle("hide", !isComp);
+  $("playground").classList.toggle("hide", !isPg);
+  // The component list drives the playground too, so the rail stays up for both.
+  $("side").classList.toggle("hide", !isComp && !isPg);
+  if (isPg) { renderSide(f); renderPlayground(); return; }
   if (isComp) {
     renderSide(f);
     // A filter that hides the selected component would otherwise strand the pane on
@@ -414,7 +666,65 @@ $("tabs").addEventListener("click", (e) => {
 });
 $("side").addEventListener("click", (e) => {
   const b = e.target.closest("[data-comp]"); if (!b) return;
-  active = b.dataset.comp; render();
+  active = b.dataset.comp;
+  PG.storyId = null;   // fall to the new component's first variant
+  render();
+});
+
+// Playground controls. Delegated from the section, so a re-render never orphans a handler.
+$("playground").addEventListener("click", (e) => {
+  // Width and theme must NOT re-render: that recreates the iframe, which reloads the story
+  // and silently discards every arg the user has set. Resize the stage in place, and switch
+  // the theme through Storybook's own globals channel instead of a new URL.
+  const w = e.target.closest("#pg-width [data-w]");
+  if (w) {
+    PG.width = w.dataset.w;
+    const preset = WIDTHS.find((x) => x.id === PG.width) || WIDTHS[0];
+    document.querySelector("#playground .pg-frame").style.width = preset.css;
+    for (const btn of e.currentTarget.querySelectorAll("#pg-width [data-w]")) {
+      btn.setAttribute("aria-pressed", String(btn === w));
+    }
+    return;
+  }
+  const t = e.target.closest("#pg-theme [data-t]");
+  if (t) {
+    PG.theme = t.dataset.t;
+    for (const btn of e.currentTarget.querySelectorAll("#pg-theme [data-t]")) {
+      btn.setAttribute("aria-pressed", String(btn === t));
+    }
+    sendToStory("updateGlobals", { globals: { theme: pgMode() } });
+    return;
+  }
+  if (e.target.closest("#pg-reset")) {
+    const init = (PG.prepared && PG.prepared.initialArgs) || {};
+    PG.args = { ...init };
+    // resetStoryArgs clears everything the manager set; then re-apply the story's own args.
+    sendToStory("resetStoryArgs", { storyId: PG.storyId });
+    renderControls();
+    return;
+  }
+  const choice = e.target.closest('.segbtns[data-kind="choice"] [data-v]');
+  if (choice) {
+    const group = choice.closest("[data-arg]");
+    for (const b of group.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === choice));
+    setArg(group.dataset.arg, choice.dataset.v);
+  }
+});
+
+$("playground").addEventListener("input", (e) => {
+  const el = e.target.closest("[data-arg]");
+  if (!el || el.tagName === "DIV") return;
+  const kind = el.dataset.kind;
+  const value = kind === "boolean" ? el.checked : kind === "number" ? Number(el.value) : el.value;
+  setArg(el.dataset.arg, value);
+});
+
+$("playground").addEventListener("change", (e) => {
+  const sel = e.target.closest("#pg-variant");
+  if (!sel) return;
+  PG.storyId = sel.value;
+  PG.prepared = null; PG.args = {};
+  renderPlayground();
 });
 $("foundations").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-copy]"); if (!b) return;
@@ -424,9 +734,6 @@ $("foundations").addEventListener("click", async (e) => {
     meta.textContent = "copied ✓";
     setTimeout(() => { meta.textContent = was; }, 900);
   } catch { /* clipboard blocked in this frame; the name is on screen to copy by hand */ }
-});
-$("big").addEventListener("change", (e) => {
-  document.body.classList.toggle("big", e.target.checked);
 });
 $("q").addEventListener("input", () => { if (DATA) render(); });
 $("refresh").addEventListener("click", async () => {
