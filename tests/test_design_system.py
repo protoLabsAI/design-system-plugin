@@ -813,3 +813,130 @@ def test_ships_an_agent_facing_skill():
     assert "Never name a component, variant, prop, class or token you have not read" in body
     for tool in ("ds_search", "ds_story", "ds_check", "show_component", "ds-designer"):
         assert tool in body, f"skill never mentions {tool}"
+
+
+def test_readme_documents_mcp_exposure_without_shipping_a_server():
+    """`register_mcp_server` is for a server the agent CONNECTS TO. Exposing our tools
+    outward is already the host's operator-MCP surface, so this plugin documents the config
+    rather than shipping a redundant server."""
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    assert "operator_mcp_tools:" in readme
+    assert "register_mcp_server" in readme and "wrong seam" in readme
+    src = (Path(__file__).resolve().parent.parent / "__init__.py").read_text()
+    assert "register_mcp_server" not in src, "don't ship an MCP server; the host already exposes tools"
+
+
+def test_release_uses_the_shared_fleet_ritual():
+    """Releases go through release-tools' reusable workflow (tag → themed notes → Discord),
+    not a hand-run `gh release create` — and its fork guard must name THIS repo, or a fork
+    would cut releases against the upstream name."""
+    import yaml
+
+    wf = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "release.yml"
+    assert wf.is_file(), "no release workflow — releases would stay hand-cut"
+    job = yaml.safe_load(wf.read_text())["jobs"]["release"]
+    assert job["uses"].startswith("protoLabsAI/release-tools/.github/workflows/plugin-release.yml@")
+    assert "protoLabsAI/design-system-plugin" in job["if"]
+    assert "chore: release v" in job["if"]
+
+
+# ── review follow-ups ─────────────────────────────────────────────────────────
+
+
+def test_emitted_topic_declares_a_usable_schema():
+    """REGRESSION: `payload:` is not a manifest field. The parser reads topic + summary/schema
+    and silently drops anything else, so a `payload:` block leaves the topic UNTYPED — exactly
+    what the field exists to prevent."""
+    import yaml
+
+    manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "protoagent.plugin.yaml").read_text())
+    entry = next(e for e in manifest["emits"] if e["topic"] == "design-system.drift-detected")
+    assert "payload" not in entry, "`payload:` is dropped by the manifest parser — use `schema:`"
+    schema = entry["schema"]
+    assert schema["type"] == "object"
+    assert set(schema["required"]) <= set(schema["properties"])
+    # The keys ds_drift actually emits must all be described.
+    for key in ("repo", "ref", "tokens_changed", "components_added", "components_removed"):
+        assert key in schema["properties"], f"schema omits emitted key {key}"
+
+
+def test_network_declaration_names_hosts_not_a_wildcard():
+    """`capabilities.network` is declarative transparency; "*" declares nothing."""
+    import yaml
+
+    manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "protoagent.plugin.yaml").read_text())
+    hosts = manifest["capabilities"]["network"]
+    assert "*" not in hosts and hosts, hosts
+
+
+def test_manifest_description_matches_what_the_plugin_now_does():
+    """This blurb is what Discover and Settings ▸ Plugins show — it drifted behind the README."""
+    import yaml
+
+    manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "protoagent.plugin.yaml").read_text())
+    d = manifest["description"]
+    for claim in ("ds-explainer", "ds-designer", "design-critic", "Storybook", "console"):
+        assert claim in d, f"description never mentions {claim}"
+
+
+def test_refresh_clears_every_cached_read(monkeypatch):
+    """REGRESSION: /refresh cleared only the Storybook cache, so ds_kit_classes kept serving a
+    stale class vocabulary with no refresh path — a prototype could be written against classes
+    the kit no longer ships."""
+    monkeypatch.setattr(ds, "_SB_CACHE", (1.0, ["stale"]), raising=False)
+    monkeypatch.setattr(ds, "_KIT_CACHE", (1.0, ["pl-stale"]), raising=False)
+    out = next(r for r in ds._build_data_router().routes if r.path == "/refresh").endpoint()
+    assert out["ok"] is True
+    assert ds._SB_CACHE is None and ds._KIT_CACHE is None
+
+
+def test_sibling_modules_load_through_one_loader():
+    """Three byte-identical importlib blocks collapsed into one memoised helper."""
+    assert ds._sibling("tokens.py") is ds._tokens_mod()
+    assert ds._sibling("storybook.py") is ds._sb_mod()
+    assert ds._sibling("theme.py") is ds._theme_mod()
+    assert ds._sibling("tokens.py") is ds._sibling("tokens.py"), "not memoised"
+
+
+def test_frame_reveal_hangs_off_load_not_render_time():
+    """REGRESSION: frames are `loading="lazy"`, so a render-time backstop can fire on a card
+    that hasn't begun loading — marking it ready while blank, which puts the white flash back
+    on scroll. Every timer must be armed from the frame's own `load`."""
+    html = _view_html()
+    body = html[html.index("function armReveal("):html.index("function revealFramesIn(")]
+    # No timer may be armed outside the load handler.
+    load_block = body[body.index('addEventListener("load"'):]
+    assert body.count("setTimeout(") == load_block.count("setTimeout("), \
+        "a setTimeout is armed outside the load handler"
+    assert "GRACE_AFTER_LOAD_MS" in load_block and "FRAME_TIMEOUT_MS" in load_block
+
+
+def test_the_playground_stage_has_a_reveal_fallback():
+    """REGRESSION: the stage revealed ONLY on a storyRendered message, so a story that throws —
+    or a Storybook that doesn't speak the channel — left a skeleton pulsing forever over a
+    component that had actually rendered."""
+    html = _view_html()
+    assert "function armPlaygroundFrame()" in html
+    assert "armReveal(frame, (f) => f.closest(\".pg-frame\").classList.add(\"ready\"))" in html
+    assert "armPlaygroundFrame();" in html, "armed nowhere — the stage would never fall back"
+
+
+def test_the_view_survives_a_narrow_rail():
+    """It ships at `placement: right`. Two fixed columns (216px rail + 288px controls) left the
+    stage at 88px by 640px wide — the opposite of the full-view brief."""
+    html = _view_html()
+    assert "@media (max-width: 1100px)" in html and "@media (max-width: 760px)" in html
+    narrow = html[html.index("@media (max-width: 1100px)"):html.index("  .status { color:")]
+    assert ".pg { flex-direction: column; }" in narrow, "controls never stack under the stage"
+    assert ".body { flex-direction: column; }" in narrow, "the rail never gives up its column"
+
+
+def test_declares_the_host_version_its_seams_need():
+    """`views[].palette` and typed `emits:` both degrade SILENTLY on an older host — no error,
+    just a missing ⌘K entry and an untyped contract. A floor makes that loud."""
+    import yaml
+
+    manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "protoagent.plugin.yaml").read_text())
+    floor = manifest.get("min_protoagent_version")
+    assert floor, "no min_protoagent_version — silent degradation on an old host"
+    assert tuple(int(x) for x in str(floor).split(".")) >= (0, 99, 0), floor

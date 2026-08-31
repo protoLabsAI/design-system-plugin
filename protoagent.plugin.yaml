@@ -1,14 +1,23 @@
 id: design-system
 name: Design System
-version: 0.7.0
+version: 0.7.1
+
+# The newest host seam this plugin depends on: TYPED `emits:` contracts (#1636, core 0.99.0).
+# `registry.emit` itself landed in 0.31.0 and `views[].palette` in 0.71.0, so 0.99.0 is the
+# floor where everything here exists. Declared because both degrade SILENTLY on an older host
+# — no error, just a missing ⌘K entry and an untyped event contract.
+min_protoagent_version: "0.99.0"
 description: >-
-  The agent's live window into a design system. Reads the configured repo's design
-  tokens, the packages/ui component inventory, and the visual-identity rules STRAIGHT FROM
-  protoContent — so the current design vocabulary is never a stale copy frozen in knowledge.
-  Tools: read tokens / components / a component's story / the rules; lint code against the
-  token vocabulary (ds_check); and a recurring DRIFT WATCH that nudges the agent when the
-  design system moves (tokens change, components added/removed) so docs + consumers stay in
-  sync. Read-live-not-cache is the whole point — the design system is a live source of truth.
+  The agent's live window into a design system, and a console surface for browsing one. Reads
+  the configured repo's design tokens, component inventory and visual-identity rules STRAIGHT
+  FROM the source, so the current design vocabulary is never a stale copy frozen in knowledge.
+  Tools: search components/variants/tokens; read tokens, rules, the Storybook inventory and a
+  component's variants (with live preview URLs); lint code against the token vocabulary
+  (ds_check); and a recurring DRIFT WATCH that broadcasts when the system moves. Subagents:
+  ds-explainer answers questions about the system, ds-designer prototypes new components and
+  renders them through the artifact plugin, design-critic reviews them against the live system
+  and WCAG. The console view browses tokens and components — the gallery renders the design
+  system's OWN published Storybook, not a replica.
 
 # Per-agent opt-in (turned on via the frontend bundle's enable list); not shipped on.
 
@@ -36,8 +45,10 @@ settings:
 
 # Declarative transparency (shown in the console).
 capabilities:
-  network: ["api.github.com", "*"]  # the repo via the GitHub contents API, plus the configured
-                                    # Storybook origin (operator-set, so it can be any host)
+  # The repo via the GitHub contents API, plus whatever `storybook_url` points at — that one
+  # is operator-set, so the default is declared and an operator who repoints it is choosing
+  # the new host knowingly.
+  network: ["api.github.com", "protocontent-storybook.pages.dev"]
   filesystem: scoped            # one small drift snapshot in the instance data dir
 
 # Auth: the GitHub contents API is read with GITHUB_TOKEN / GH_TOKEN from the env (protoContent
@@ -55,12 +66,15 @@ views:
 emits:
   - topic: design-system.drift-detected
     summary: "The design system moved — tokens changed and/or components were added/removed."
-    payload:
-      repo: string
-      ref: string
-      tokens_changed: boolean
-      components_added: string[]
-      components_removed: string[]
+    schema:
+      type: object
+      required: [repo, ref, tokens_changed]
+      properties:
+        repo: {type: string, description: "owner/name the design system was read from"}
+        ref: {type: string, description: "git ref that was read"}
+        tokens_changed: {type: boolean, description: "the built token set's content hash moved"}
+        components_added: {type: array, items: {type: string}}
+        components_removed: {type: array, items: {type: string}}
 subscribes: []
 
 # skills/ auto-loads — the agent-facing contract for using the ds_* tools together.

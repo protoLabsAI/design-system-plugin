@@ -209,6 +209,26 @@
     word-break: break-word; color: var(--pl-color-fg-muted);
     border: var(--pl-border-width) solid var(--pl-color-border);
   }
+  /* The view ships at `placement: right`, so it has to survive a rail, not just a full
+     window. Two fixed columns (216px rail + 288px controls) leave the stage at 88px by
+     640px wide — the opposite of the full-view brief. So: stack the controls under the
+     stage before that bites, then lay the component list out as a strip above it. */
+  @media (max-width: 1100px) {
+    .pg { flex-direction: column; }
+    .pg-panel {
+      flex: 0 0 auto; max-height: 38%;
+      border-left: 0; border-top: var(--pl-border-width) solid var(--pl-color-border);
+      margin-left: 0; padding: var(--pl-space-3) 0 0;
+    }
+  }
+  @media (max-width: 760px) {
+    .body { flex-direction: column; }
+    .side {
+      flex: 0 0 auto; max-height: 124px;
+      border-right: 0; border-bottom: var(--pl-border-width) solid var(--pl-color-border);
+    }
+    .cards { grid-template-columns: 1fr; }
+  }
   .status { color: var(--pl-color-fg-muted); padding: var(--pl-space-6); text-align: center; }
   .hide { display: none !important; }
   a.plain { color: var(--pl-color-accent-fg); text-decoration: none; font-size: 12px; }
@@ -359,13 +379,28 @@ window.addEventListener("message", (e) => {
   }
 });
 
+// Every story frame — gallery card or playground stage — reveals the same way, so the rules
+// live in one place.
+//
+// The backstop hangs off `load`, NOT off render time. Frames are `loading="lazy"`, so a
+// render-time timer can fire on a card that has not begun loading yet — marking it ready
+// while it is still blank, which puts the original white flash straight back on scroll. If
+// `load` never fires the frame is off-screen or still fetching, and a pulsing skeleton is the
+// honest thing to show.
+function armReveal(frame, onReady) {
+  const show = () => onReady(frame);
+  frame.addEventListener("error", show, { once: true });
+  frame.addEventListener("load", () => {
+    // `load` alone is too early — Storybook injects the story CSS afterwards. Wait for its
+    // storyRendered message, and fall back so a preview that doesn't speak the channel (or a
+    // story that throws) still resolves instead of pulsing forever.
+    setTimeout(show, GRACE_AFTER_LOAD_MS);
+    setTimeout(show, FRAME_TIMEOUT_MS);
+  }, { once: true });
+}
+
 function revealFramesIn(host) {
-  for (const frame of host.querySelectorAll(".well iframe")) {
-    // Not a reveal on its own — just bounds how long we wait for storyRendered.
-    frame.addEventListener("load", () => setTimeout(() => markReady(frame), GRACE_AFTER_LOAD_MS), { once: true });
-    frame.addEventListener("error", () => markReady(frame), { once: true });
-    setTimeout(() => markReady(frame), FRAME_TIMEOUT_MS);
-  }
+  for (const frame of host.querySelectorAll(".well iframe")) armReveal(frame, markReady);
 }
 
 function tokenChip(t) {
@@ -563,6 +598,13 @@ function renderPlayground() {
         <div class="pg-code" id="pg-code"></div>
       </aside>
     </div>`;
+  armPlaygroundFrame();
+}
+
+// The stage frame is re-created on every renderPlayground(), so arm it each time.
+function armPlaygroundFrame() {
+  const frame = document.querySelector("#playground .pg-frame iframe");
+  if (frame) armReveal(frame, (f) => f.closest(".pg-frame").classList.add("ready"));
 }
 
 function renderControls() {

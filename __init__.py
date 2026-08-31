@@ -276,7 +276,7 @@ def _kit_classes(force: bool = False) -> list[str]:
     path = _cfg("kit_css_path")
     if not path:
         raise RuntimeError("no kit_css_path configured")
-    if not force and _KIT_CACHE and (time.time() - _KIT_CACHE[0]) < _SB_TTL:
+    if not force and _KIT_CACHE and (time.time() - _KIT_CACHE[0]) < _FETCH_TTL:
         return _KIT_CACHE[1]
     names = sorted(set(_CLASS_RE.findall(_gh_get_raw(path))))
     _KIT_CACHE = (time.time(), names)
@@ -298,19 +298,8 @@ def ds_kit_classes() -> str:
 
 # ── token vocabulary (from the generated CSS) ─────────────────────────────────
 
-_TOKENS_MOD = None
-
-
 def _tokens_mod():
-    global _TOKENS_MOD
-    if _TOKENS_MOD is None:
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("design_system_tokens", Path(__file__).resolve().parent / "tokens.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _TOKENS_MOD = mod
-    return _TOKENS_MOD
+    return _sibling("tokens.py")
 
 
 def _token_sections() -> list[dict]:
@@ -328,21 +317,12 @@ def _token_sections() -> list[dict]:
 # that instead of maintaining a replica — a replica is exactly the drift this plugin exists
 # to prevent. Pure parsing lives in storybook.py; the fetch + tool surface is here.
 
-_SB_MOD = None
 _SB_CACHE: tuple[float, list[dict]] | None = None  # (fetched_at, components)
-_SB_TTL = 300.0  # the index moves on DS deploys, not per-turn; a 5-min cache is plenty
+_FETCH_TTL = 300.0  # the DS moves on deploys, not per-turn; a 5-min cache is plenty
 
 
 def _sb_mod():
-    global _SB_MOD
-    if _SB_MOD is None:
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("design_system_storybook", Path(__file__).resolve().parent / "storybook.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _SB_MOD = mod
-    return _SB_MOD
+    return _sibling("storybook.py")
 
 
 def _sb_components(force: bool = False) -> list[dict]:
@@ -356,7 +336,7 @@ def _sb_components(force: bool = False) -> list[dict]:
     base = _sb_mod().normalize_base(_cfg("storybook_url"))
     if not base:
         raise RuntimeError("no storybook_url configured — set it in Settings ▸ Plugins ▸ Design System")
-    if not force and _SB_CACHE and (time.time() - _SB_CACHE[0]) < _SB_TTL:
+    if not force and _SB_CACHE and (time.time() - _SB_CACHE[0]) < _FETCH_TTL:
         return _SB_CACHE[1]
 
     import httpx
@@ -680,19 +660,26 @@ _WATCH_PROMPT = (
 
 
 
-_THEME_MOD = None  # loaded by path (the plugin dir isn't an importable package)
+# The plugin dir isn't an importable package name, so siblings load by path. One loader,
+# memoised — this was copy-pasted three times before.
+_SIBLINGS: dict[str, object] = {}
+
+
+def _sibling(filename: str):
+    """Import a sibling module by path (``theme.py`` → ``design_system_theme``)."""
+    if filename not in _SIBLINGS:
+        import importlib.util
+
+        stem = Path(filename).stem
+        spec = importlib.util.spec_from_file_location(f"design_system_{stem}", Path(__file__).resolve().parent / filename)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _SIBLINGS[filename] = mod
+    return _SIBLINGS[filename]
 
 
 def _theme_mod():
-    global _THEME_MOD
-    if _THEME_MOD is None:
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("design_system_theme", Path(__file__).resolve().parent / "theme.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _THEME_MOD = mod
-    return _THEME_MOD
+    return _sibling("theme.py")
 
 
 # ── theme-designer tools (LCH engine, ported from the operator's proto2 playground) ──
@@ -839,10 +826,16 @@ def _build_data_router():
 
     @router.post("/refresh")
     def refresh() -> dict:
-        """Drop the Storybook cache so a DS deploy shows up without waiting out the TTL."""
-        global _SB_CACHE
+        """Drop every cached read so a DS deploy shows up without waiting out the TTL.
+
+        Both caches, deliberately: clearing only the Storybook one left ds_kit_classes serving
+        a stale class vocabulary with no way to refresh it, so a prototype could be written
+        against classes the kit no longer ships.
+        """
+        global _SB_CACHE, _KIT_CACHE
         _SB_CACHE = None
-        return {"ok": True}
+        _KIT_CACHE = None
+        return {"ok": True, "cleared": ["storybook", "kit-classes"]}
 
     return router
 
