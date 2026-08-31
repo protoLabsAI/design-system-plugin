@@ -99,9 +99,35 @@
     border-bottom: var(--pl-border-width) solid var(--pl-color-border);
   }
   .card header .nm { font-weight: var(--pl-font-weight-medium); font-size: 12.5px; }
-  .card iframe { width: 100%; height: 180px; border: 0; background: var(--pl-color-bg-raised); display: block; }
-  .card.tall iframe { height: 560px; }
-  body.big .card iframe, body.big .card.tall iframe { height: 560px; }
+  /* The frame WELL owns the height and the ground colour. The iframe is cross-origin, so
+     we can't style its document — before its CSS lands the browser paints that document's
+     default canvas WHITE, which is the flash. Two defences, both from outside the frame:
+     `color-scheme` below (so the pre-CSS canvas is painted in our mode, not white), and
+     holding the frame hidden over a themed skeleton until it has actually painted. */
+  .well { position: relative; height: 180px; background: var(--pl-color-bg-raised); }
+  .card.tall .well { height: 560px; }
+  body.big .well, body.big .card.tall .well { height: 560px; }
+  .well iframe {
+    width: 100%; height: 100%; border: 0; display: block;
+    background: var(--pl-color-bg-raised);
+    /* Paints the embedded document's initial canvas in our scheme instead of white. */
+    color-scheme: dark;
+    opacity: 0;
+  }
+  body.lightmode .well iframe { color-scheme: light; }
+  .card.ready .well iframe { opacity: 1; }
+  .well .skel {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    background: var(--pl-color-bg-raised); pointer-events: none;
+  }
+  .card.ready .well .skel { display: none; }
+  .well .skel span {
+    width: 42%; height: 10px; border-radius: 999px;
+    background: var(--pl-color-bg-subtle);
+    animation: pulse var(--pl-motion-loading, 1000ms) ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: .45 } 50% { opacity: .9 } }
+  @media (prefers-reduced-motion: reduce) { .well .skel span { animation: none } }
   .status { color: var(--pl-color-fg-muted); padding: var(--pl-space-6); text-align: center; }
   .hide { display: none !important; }
   a.plain { color: var(--pl-color-accent-fg); text-decoration: none; font-size: 12px; }
@@ -149,7 +175,7 @@ try {
   kit = await import(base + "/_ds/plugin-kit.js");
   // The callback fires on the initial handshake AND on every live operator re-theme,
   // so the story frames follow the console instead of freezing at load-time theme.
-  kit.initPluginView(() => { if (DATA && tab === "components") renderComponent(); });
+  kit.initPluginView(() => { syncMode(); if (DATA && tab === "components") renderComponent(); });
 } catch (err) {
   // Fail loudly: the bearer arrives THROUGH the kit handshake, so a bare-fetch fallback
   // could only 401 and would blame auth for a missing /_ds bundle.
@@ -183,6 +209,31 @@ function currentMode() {
 }
 
 const themed = (url) => url + "&globals=theme:" + currentMode();
+
+// Mirror the resolved mode onto <body> so `color-scheme` on the frames matches it. Without
+// this the embedded document's pre-CSS canvas is painted in the WRONG scheme — still a
+// flash, just a dark one on a light console.
+function syncMode() {
+  document.body.classList.toggle("lightmode", currentMode() === "light");
+}
+
+// A cross-origin frame gives us `load` (but never its document), so that's the only honest
+// "it has painted" signal available. The timeout is the safety net: a story that 404s or
+// hangs must not leave a skeleton pulsing forever.
+const FRAME_TIMEOUT_MS = 10000;
+function revealFramesIn(host) {
+  for (const frame of host.querySelectorAll(".well iframe")) {
+    const card = frame.closest(".card");
+    if (!card) continue;
+    const show = () => card.classList.add("ready");
+    // requestAnimationFrame: `load` fires when the document finished loading, which can be
+    // a frame BEFORE it is first painted — revealing on the raw event reintroduces a
+    // shorter flash of the same white.
+    frame.addEventListener("load", () => requestAnimationFrame(show), { once: true });
+    frame.addEventListener("error", show, { once: true });
+    setTimeout(show, FRAME_TIMEOUT_MS);
+  }
+}
 
 // Stories that lay out a whole screen need room; a 260px card crops them into nonsense.
 const TALL = /app ?shell|full|conversation|thread|splash|palette|blog|mobile|rail|dock/i;
@@ -270,9 +321,11 @@ function renderComponent() {
     html += `<div class="card${tall}"><header><span class="nm">${esc(s.name)}</span>
       <span class="grow" style="flex:1"></span>
       <a class="plain" href="${esc(s.docs)}" target="_blank" rel="noopener">Storybook ↗</a></header>
-      <iframe loading="lazy" title="${esc(comp.label)} — ${esc(s.name)}" src="${esc(themed(s.preview))}"></iframe></div>`;
+      <div class="well"><div class="skel"><span></span></div>
+      <iframe loading="lazy" title="${esc(comp.label)} — ${esc(s.name)}" src="${esc(themed(s.preview))}"></iframe></div></div>`;
   }
   host.innerHTML = html + `</div>`;
+  revealFramesIn(host);
 }
 
 function render() {
@@ -296,6 +349,7 @@ function render() {
 }
 
 async function load() {
+  syncMode();
   const res = await kit.apiFetch("/api/plugins/design-system/catalog");
   if (!res.ok) { $("status").textContent = `Could not read the catalog (HTTP ${res.status}).`; return; }
   DATA = await res.json();
