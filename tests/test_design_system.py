@@ -229,3 +229,288 @@ def test_colorcore_roundtrip_and_luminance():
         assert all(abs(x - y) <= 2 / 255 for x, y in zip(a, b)), (h, back)
     assert abs(th.cc.wcag_luminance((1.0, 1.0, 1.0)) - 1.0) < 1e-6
     assert th.cc.wcag_luminance((0.0, 0.0, 0.0)) == 0.0
+
+
+# ── Storybook bridge ──────────────────────────────────────────────────────────
+
+_sbspec = importlib.util.spec_from_file_location("design_system_storybook", Path(__file__).resolve().parent.parent / "storybook.py")
+sb = importlib.util.module_from_spec(_sbspec)
+_sbspec.loader.exec_module(sb)
+
+# Shape mirrors a real Storybook index.json: story entries keyed by id, grouped by `title`.
+_INDEX = {
+    "v": 5,
+    "entries": {
+        "components-primitives-button--default": {
+            "type": "story", "id": "components-primitives-button--default",
+            "name": "Default", "title": "Components/Primitives/Button",
+            "importPath": "./src/Button.stories.tsx",
+        },
+        "components-primitives-button--variants": {
+            "type": "story", "id": "components-primitives-button--variants",
+            "name": "Variants", "title": "Components/Primitives/Button",
+            "importPath": "./src/Button.stories.tsx",
+        },
+        "components-overlays--toasts": {
+            "type": "story", "id": "components-overlays--toasts",
+            "name": "Toasts", "title": "Components/Overlays",
+            "importPath": "./src/Overlays.stories.tsx",
+        },
+        "foundations--colors": {
+            "type": "story", "id": "foundations--colors",
+            "name": "Colors", "title": "Foundations",
+            "importPath": "./src/Foundations.stories.tsx",
+        },
+        "components-overlays--docs": {
+            "type": "docs", "id": "components-overlays--docs",
+            "name": "Docs", "title": "Components/Overlays",
+            "importPath": "./src/Overlays.stories.tsx",
+        },
+    },
+}
+
+
+def test_parse_index_folds_stories_into_components():
+    comps = sb.parse_index(_INDEX)
+    by_title = {c["title"]: c for c in comps}
+    assert set(by_title) == {"Foundations", "Components/Overlays", "Components/Primitives/Button"}
+    btn = by_title["Components/Primitives/Button"]
+    assert btn["label"] == "Button" and btn["group"] == "Components/Primitives"
+    assert [s["name"] for s in btn["stories"]] == ["Default", "Variants"]
+
+
+def test_parse_index_separates_docs_entries_from_rendered_stories():
+    """A docs entry has no visual, so the gallery must not offer it as a preview card."""
+    overlays = next(c for c in sb.parse_index(_INDEX) if c["label"] == "Overlays")
+    assert [s["name"] for s in overlays["stories"]] == ["Toasts"]
+    assert [s["name"] for s in overlays["docs"]] == ["Docs"]
+
+
+def test_ungrouped_component_has_empty_group():
+    foundations = next(c for c in sb.parse_index(_INDEX) if c["label"] == "Foundations")
+    assert foundations["group"] == ""
+
+
+def test_preview_url_is_extensionless_by_default():
+    """A Cloudflare Pages export 308s /iframe.html to /iframe; a local `storybook dev`
+    serves ONLY /iframe.html. Default to the form that survives the redirect."""
+    url = sb.preview_url("https://sb.example.com/", "button--primary")
+    assert url.startswith("https://sb.example.com/iframe?id=button--primary")
+    assert "viewMode=story" in url
+    assert sb.preview_url("http://localhost:6006", "button--primary", legacy=True).startswith(
+        "http://localhost:6006/iframe.html?id="
+    )
+
+
+def test_normalize_base_trims_trailing_slash():
+    assert sb.normalize_base("  https://sb.example.com/ ") == "https://sb.example.com"
+
+
+@pytest.mark.parametrize("needle", ["Button", "components/primitives/button", "BUTTON"])
+def test_find_component_matches_title_label_and_case(needle):
+    assert sb.find_component(sb.parse_index(_INDEX), needle)["label"] == "Button"
+
+
+def test_find_component_misses_return_none():
+    assert sb.find_component(sb.parse_index(_INDEX), "Nonexistent") is None
+    assert sb.find_component(sb.parse_index(_INDEX), "") is None
+
+
+def test_group_tree_buckets_by_group():
+    tree = {n["group"]: n for n in sb.group_tree(sb.parse_index(_INDEX))}
+    assert set(tree) == {"", "Components", "Components/Primitives"}
+
+
+def test_summarize_lists_every_component_and_variant():
+    out = sb.summarize(sb.parse_index(_INDEX))
+    assert "3 components / 4 stories" in out
+    assert "Button: Default, Variants" in out
+
+
+# ── token CSS parsing ─────────────────────────────────────────────────────────
+
+_tkspec = importlib.util.spec_from_file_location("design_system_tokens", Path(__file__).resolve().parent.parent / "tokens.py")
+tk = importlib.util.module_from_spec(_tkspec)
+_tkspec.loader.exec_module(tk)
+
+# Mirrors the real generated file: a bare :root carrying the FULL set, a light @media
+# wrapper with its own nested :root, and explicit [data-theme] force blocks.
+_CSS = """
+/* GENERATED from src/tokens.js by scripts/build.mjs — do not edit by hand. */
+:root {
+  color-scheme: dark;
+  --pl-color-bg: #0a0a0c;
+  --pl-color-fg: #ededed;
+  --pl-color-brand-lavender: #9b87f2;
+  --pl-space-4: 16px;
+  --pl-motion-fast: 120ms;
+  --pl-font-sans: "Geist", system-ui, sans-serif;
+  --pl-shadow-popover: 0 8px 28px rgba(0, 0, 0, 0.5);
+  --pl-gradient-brand: linear-gradient(135deg, #9b87f2 0%, #6366f1 100%);
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --pl-color-bg: #f6f7f9;
+    --pl-color-fg: #18181b;
+  }
+}
+/* Explicit theme force — wins over the OS preference above. */
+:root[data-theme="light"] {
+  --pl-color-bg: #f6f7f9;
+  --pl-color-fg: #18181b;
+}
+:root[data-theme="dark"] {
+  --pl-color-bg: #0a0a0c;
+  --pl-color-fg: #ededed;
+}
+"""
+
+
+def test_parse_css_splits_dark_and_light():
+    th = tk.parse_css(_CSS)
+    assert th["dark"]["--pl-color-bg"] == "#0a0a0c"
+    assert th["light"]["--pl-color-bg"] == "#f6f7f9"
+    # A token the light theme never overrides must still be present in it.
+    assert th["light"]["--pl-space-4"] == "16px"
+    assert th["light"]["--pl-color-brand-lavender"] == "#9b87f2"
+
+
+def test_parse_css_is_independent_of_block_order():
+    """REGRESSION: a flat scan folds the light @media's nested :root into the dark set,
+    and only looks right while a later [data-theme="dark"] block happens to undo it.
+    Reordering the DS's output must not flip dark to light."""
+    blocks = [b for b in _CSS.strip().split("\n}\n") if b.strip()]
+    shuffled = "\n}\n".join(reversed(blocks)) + "\n}\n"
+    assert tk.parse_css(shuffled)["dark"]["--pl-color-bg"] == "#0a0a0c"
+    assert tk.parse_css(shuffled)["light"]["--pl-color-bg"] == "#f6f7f9"
+
+
+def test_parse_css_ignores_leading_comment_in_selector():
+    """The generated banner comment sits directly before `:root`; if it rides along in the
+    captured selector text the full base block is silently dropped."""
+    assert len(tk.parse_css(_CSS)["dark"]) == 8
+
+
+@pytest.mark.parametrize(
+    "value,kind",
+    [
+        ("#9b87f2", "color"),
+        ("rgba(255, 255, 255, 0.08)", "color"),
+        ("oklch(0.72 0.13 145)", "color"),
+        ("linear-gradient(135deg, #9b87f2 0%, #6366f1 100%)", "gradient"),
+        ("0 8px 28px rgba(0, 0, 0, 0.5)", "shadow"),
+        ("16px", "length"),
+        ("120ms", "duration"),
+        ('"Geist", system-ui, sans-serif', "font"),
+        ("440", "number"),
+        ("ease-in-out", "keyword"),
+    ],
+)
+def test_classify_covers_every_token_kind(value, kind):
+    """A gradient carries color stops and a shadow carries an rgba(), so both must be
+    settled before the generic color test."""
+    assert tk.classify(value) == kind
+
+
+def test_group_tokens_orders_sections_and_flags_themed():
+    th = tk.parse_css(_CSS)
+    secs = tk.group_tokens(th["dark"], th["light"])
+    # The fixture has no radius/border tokens, so assert the exact sections it DOES yield,
+    # in the order a foundations page should read them.
+    assert [s["section"] for s in secs] == [
+        "Color", "Gradient", "Elevation", "Typography", "Space", "Motion",
+    ]
+    colors = next(s for s in secs if s["section"] == "Color")["tokens"]
+    by_var = {t["var"]: t for t in colors}
+    assert by_var["--pl-color-bg"]["themed"] is True
+    assert by_var["--pl-color-brand-lavender"]["themed"] is False
+    assert by_var["--pl-color-bg"]["light"] == "#f6f7f9"
+
+
+def test_group_tokens_strips_the_pl_prefix_for_display():
+    secs = tk.group_tokens(tk.parse_css(_CSS)["dark"])
+    assert any(t["name"] == "color-bg" for s in secs for t in s["tokens"])
+
+
+def test_token_summarize_notes_the_light_value_only_when_it_differs():
+    out = tk.summarize(tk.group_tokens(*[tk.parse_css(_CSS)[k] for k in ("dark", "light")]))
+    assert "var(--pl-color-bg) = #0a0a0c   (light: #f6f7f9)" in out
+    assert "var(--pl-space-4) = 16px\n" in out
+
+
+# ── ds_stories / ds_story tools + the catalog route ───────────────────────────
+
+
+@pytest.fixture
+def _sb(monkeypatch):
+    """Serve the fixture index in place of the network, cache cleared."""
+    monkeypatch.setattr(ds, "_SB_CACHE", None, raising=False)
+    monkeypatch.setattr(ds, "_sb_components", lambda force=False: sb.parse_index(_INDEX))
+    return ds
+
+
+def test_ds_stories_returns_the_inventory(_sb):
+    out = _call(ds.ds_stories)
+    assert "3 components / 4 stories" in out
+    assert "Button: Default, Variants" in out
+
+
+def test_ds_story_lists_variants_with_live_urls(_sb):
+    out = _call(ds.ds_story, name="Button")
+    assert "Components/Primitives/Button — 2 variant(s)" in out
+    assert "iframe?id=components-primitives-button--default" in out
+    assert "./src/Button.stories.tsx" in out
+
+
+def test_ds_story_unknown_name_points_at_the_inventory(_sb):
+    assert "ds_stories" in _call(ds.ds_story, name="Nope")
+
+
+def test_ds_stories_surfaces_a_fetch_failure(monkeypatch):
+    def boom(force=False):
+        raise RuntimeError("could not fetch the Storybook index")
+    monkeypatch.setattr(ds, "_sb_components", boom)
+    assert "ds_stories error" in _call(ds.ds_stories)
+
+
+def test_catalog_isolates_a_token_failure_from_the_gallery(monkeypatch, _sb):
+    """Tokens and stories come from different origins. One being down must not blank the
+    other — a DS with no published Storybook should still browse its tokens, and a repo
+    the plugin can't read shouldn't hide a gallery that loads fine."""
+    def boom():
+        raise RuntimeError("repo unreachable")
+    monkeypatch.setattr(ds, "_token_sections", boom)
+    catalog = next(r for r in ds._build_data_router().routes if r.path == "/catalog").endpoint
+    out = catalog()
+    assert out["tokens_error"] == "repo unreachable"
+    assert out["tokens"] == []
+    assert out["components_error"] is None
+    assert [g["group"] for g in out["groups"]] == ["", "Components", "Components/Primitives"]
+
+
+def test_catalog_isolates_a_gallery_failure_from_the_tokens(monkeypatch):
+    def boom(force=False):
+        raise RuntimeError("no storybook_url configured")
+    monkeypatch.setattr(ds, "_sb_components", boom)
+    monkeypatch.setattr(ds, "_token_sections", lambda: [{"section": "Color", "tokens": []}])
+    out = next(r for r in ds._build_data_router().routes if r.path == "/catalog").endpoint()
+    assert out["components_error"] == "no storybook_url configured"
+    assert out["groups"] == []
+    assert out["tokens"] and out["tokens_error"] is None
+
+
+def test_catalog_attaches_a_preview_url_to_every_story(_sb):
+    out = next(r for r in ds._build_data_router().routes if r.path == "/catalog").endpoint()
+    stories = [s for g in out["groups"] for c in g["components"] for s in c["stories"]]
+    assert stories and all(s["preview"].startswith("http") and "viewMode=story" in s["preview"] for s in stories)
+    assert all("?path=/story/" in s["docs"] for s in stories)
+
+
+def test_view_router_serves_the_path_the_manifest_declares():
+    """Rule 1 of a plugin view: a mismatch between the manifest path and the served route
+    is a blank iframe with no error anywhere."""
+    import yaml
+
+    manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "protoagent.plugin.yaml").read_text())
+    declared = manifest["views"][0]["path"]
+    assert declared == "/plugins/design-system" + next(r.path for r in ds._build_view_router().routes)

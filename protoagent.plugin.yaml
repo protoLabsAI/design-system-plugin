@@ -1,6 +1,6 @@
 id: design-system
 name: Design System
-version: 0.3.2
+version: 0.4.0
 description: >-
   The agent's live window into a design system. Reads the configured repo's design
   tokens, the packages/ui component inventory, and the visual-identity rules STRAIGHT FROM
@@ -18,7 +18,12 @@ config:
   repo: protoLabsAI/protoContent      # owner/name the design system lives in
   ref: main                           # git ref to read
   tokens_path: packages/design-system/dist/tokens.json   # committed built token set (clean JSON)
-  components_path: packages/ui/src                          # Storybook component inventory
+  components_path: packages/ui/src                          # component sources (story files)
+  tokens_css_path: packages/design-system/dist/tokens.css   # generated --pl-* vars (the token CONTRACT)
+  # Root URL of the DS's PUBLISHED Storybook. This is what the console gallery renders —
+  # one <iframe src=".../iframe?id=<story>"> per variant, so the explorer shows the real
+  # library at its current deploy rather than a replica that drifts. Blank = gallery off.
+  storybook_url: https://protocontent-storybook.pages.dev
   rules_path: docs/reference/visual-identity.md           # the when-to-use / what-we-don't-do rules
   watch_cron: "0 14 * * *"            # daily 14:00 UTC drift check; "" = watch off
 
@@ -26,12 +31,19 @@ config:
 settings:
   - {key: repo, label: "Design-system repo (owner/name)", type: string}
   - {key: ref, label: "Git ref", type: string}
+  - {key: storybook_url, label: "Published Storybook URL", type: string, description: "Root of the design system's deployed Storybook — powers the Components gallery. Blank turns the gallery off."}
   - {key: watch_cron, label: "Drift-watch cron (blank = off)", type: string}
 
 # Declarative transparency (shown in the console).
 capabilities:
-  network: ["api.github.com"]   # reads the repo via the GitHub contents API (token-authed for private repos)
+  network: ["api.github.com", "*"]  # the repo via the GitHub contents API, plus the configured
+                                    # Storybook origin (operator-set, so it can be any host)
   filesystem: scoped            # one small drift snapshot in the instance data dir
 
 # Auth: the GitHub contents API is read with GITHUB_TOKEN / GH_TOKEN from the env (protoContent
 # is private). Same token the github plugin uses; no separate plugin secret.
+
+# Console view (ADR 0038) — the design-system explorer. The plugin serves its own page;
+# the console renders it in a sandboxed iframe, so there's no host build to keep in step.
+views:
+  - { id: design-system, label: "Design System", icon: "Component", placement: right, path: "/plugins/design-system/view" }
