@@ -34,7 +34,14 @@ The plugin serves a console view (**Design System** in the right rail) with two 
 - **Foundations** — the live token vocabulary as swatches, type specimens, spacing rules and
   motion values. Themed tokens render as a split chip showing the dark and light face together,
   because the *pair* is what you actually judge; click any token to copy its `var()`.
-- **Components** — the gallery, one card per variant.
+- **Components** — the gallery, one card per variant, filterable by component *or* variant name.
+- **Playground** — one story filling the viewport (stage and controls are full-height
+  panels; nothing scrolls to see the preview) with a controls panel, a width picker
+  (fill / 1280 / 768 / 390) and a theme override. The controls are generated from the
+  story's **own `argTypes`**, which Storybook hands over its channel, so the panel always
+  matches the real component API instead of a schema we'd have to keep in step by hand.
+  Editing a control drives the live component through `updateStoryArgs` — the same message
+  Storybook's own manager sends — and the panel shows the resulting JSX to copy.
 
 **The gallery renders the design system's own published Storybook**, not a replica. The inventory
 comes from `index.json` and each card is an `<iframe>` onto that Storybook's `/iframe?id=<story>`.
