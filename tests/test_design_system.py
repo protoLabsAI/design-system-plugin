@@ -624,3 +624,22 @@ def test_telejson_duplicate_markers_are_resolved_not_spread():
     html = _view_html()
     assert "_duplicate_" in html and "function undup(" in html
     assert "isPlainObject(live) ? live : prep.initialArgs" in html
+
+
+def test_playground_fills_the_viewport_without_page_scroll():
+    """`height: 100%` on .pg resolves against an auto-height block unless every ancestor is
+    a zero-min flex box — which is what left the stage short with dead space beneath it."""
+    html = _view_html()
+    assert "body.pg-full .main { overflow: hidden; display: flex; flex-direction: column;" in html
+    assert "body.pg-full #playground { flex: 1 1 auto; min-height: 0; display: flex; }" in html
+    assert "body.pg-full .pg { flex: 1 1 auto; }" in html
+    assert 'classList.toggle("pg-full", isPg)' in html
+    # A min-height floor on the stage would reintroduce page scroll on a short viewport.
+    assert "min-height: 320px" not in html
+
+
+def test_gallery_keeps_its_own_scrolling():
+    """The full-height switch is scoped to the playground — a gallery of many cards must
+    still scroll, so .main stays a scroll container everywhere else."""
+    html = _view_html()
+    assert ".main { flex: 1 1 auto; overflow-y: auto;" in html
