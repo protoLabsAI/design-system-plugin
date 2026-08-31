@@ -499,7 +499,8 @@ def test_catalog_isolates_a_gallery_failure_from_the_tokens(monkeypatch):
     assert out["tokens"] and out["tokens_error"] is None
 
 
-def test_catalog_attaches_a_preview_url_to_every_story(_sb):
+def test_catalog_attaches_a_preview_url_to_every_story(_sb, monkeypatch):
+    monkeypatch.setattr(ds, "_token_sections", lambda: [{"section": "Color", "tokens": []}])
     out = next(r for r in ds._build_data_router().routes if r.path == "/catalog").endpoint()
     stories = [s for g in out["groups"] for c in g["components"] for s in c["stories"]]
     assert stories and all(s["preview"].startswith("http") and "viewMode=story" in s["preview"] for s in stories)
@@ -631,9 +632,10 @@ def test_playground_fills_the_viewport_without_page_scroll():
     a zero-min flex box — which is what left the stage short with dead space beneath it."""
     html = _view_html()
     assert "body.pg-full .main { overflow: hidden; display: flex; flex-direction: column;" in html
-    assert "body.pg-full #playground { flex: 1 1 auto; min-height: 0; display: flex; }" in html
-    assert "body.pg-full .pg { flex: 1 1 auto; }" in html
-    assert 'classList.toggle("pg-full", isPg)' in html
+    # Both full-bleed panes (playground and design) ride the same chain.
+    assert "body.pg-full #playground, body.pg-full #design { flex: 1 1 auto; min-height: 0; display: flex; }" in html
+    assert "body.pg-full .pg, body.pg-full .dz { flex: 1 1 auto; }" in html
+    assert 'classList.toggle("pg-full", isPg || isDesign)' in html
     # A min-height floor on the stage would reintroduce page scroll on a short viewport.
     assert "min-height: 320px" not in html
 
@@ -643,3 +645,215 @@ def test_gallery_keeps_its_own_scrolling():
     still scroll, so .main stays a scroll container everywhere else."""
     html = _view_html()
     assert ".main { flex: 1 1 auto; overflow-y: auto;" in html
+
+
+# ── ask (ds-explainer) ────────────────────────────────────────────────────────
+
+
+def _ask_endpoint():
+    return next(r for r in ds._build_data_router().routes if r.path == "/ask").endpoint
+
+
+def _call_ask(body):
+    import asyncio
+
+    return asyncio.run(_ask_endpoint()(body))
+
+
+@pytest.mark.parametrize("body", [{}, {"question": "   "}, None])
+def test_ask_rejects_an_empty_question(body):
+    out = _call_ask(body)
+    assert out["ok"] is False and "Ask a question" in out["error"]
+
+
+def test_ask_rejects_an_oversized_question():
+    out = _call_ask({"question": "x" * 2001})
+    assert out["ok"] is False and "too long" in out["error"]
+
+
+def test_ask_injects_the_plugins_own_tools(monkeypatch):
+    """REGRESSION: a subagent resolves its allowlist against the LEAD agent's bound tool map,
+    which a plugin route plays no part in building — so without injecting them explicitly the
+    call degrades to 'No tools available for subagent', with nothing saying why."""
+    seen = {}
+
+    async def fake(subagent_type, prompt, *, description, extra_tools=None, **kw):
+        seen.update(type=subagent_type, prompt=prompt, tools=[t.name for t in (extra_tools or [])])
+        return "answer"
+
+    import sys, types
+    mod = types.ModuleType("graph.sdk")
+    mod.run_subagent = fake
+    monkeypatch.setitem(sys.modules, "graph.sdk", mod)
+
+    out = _call_ask({"question": "which button for delete?"})
+    assert out["ok"] is True and out["answer"] == "answer"
+    assert seen["type"] == "ds-explainer"
+    assert seen["tools"], "no tools injected — the subagent would report 'No tools available'"
+    assert {"ds_rules", "ds_tokens", "ds_stories"} <= set(seen["tools"])
+
+
+def test_explainer_allowlist_is_derived_from_the_injected_tools():
+    """One source: the allowlist can't drift from what the route actually injects."""
+    import sys, types
+
+    stub = types.ModuleType("graph.subagents.config")
+
+    class SubagentConfig:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    stub.SubagentConfig = SubagentConfig
+    pkg = types.ModuleType("graph.subagents")
+    pkg.config = stub
+    sys.modules.setdefault("graph", types.ModuleType("graph"))
+    sys.modules["graph.subagents"] = pkg
+    sys.modules["graph.subagents.config"] = stub
+
+    cfg = ds._build_explainer()
+    assert cfg.name == "ds-explainer"
+    assert cfg.tools == [t.name for t in ds._explainer_tools()]
+
+
+def test_ask_surfaces_a_failure_instead_of_500ing(monkeypatch):
+    import sys, types
+
+    async def boom(*a, **kw):
+        raise RuntimeError("gateway down")
+
+    mod = types.ModuleType("graph.sdk")
+    mod.run_subagent = boom
+    monkeypatch.setitem(sys.modules, "graph.sdk", mod)
+    out = _call_ask({"question": "anything"})
+    assert out["ok"] is False and "gateway down" in out["error"]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("[ds-explainer completed: Answer a design-system question]\n\nUse Button.", "Use Button."),
+        ("No banner here.", "No banner here."),
+        ("[craft completed: x] body", "body"),
+    ],
+)
+def test_subagent_banner_is_stripped(raw, expected):
+    """The dispatcher banner names which delegate answered — noise in a pane that only ever
+    shows this one."""
+    assert ds._strip_subagent_banner(raw) == expected
+
+
+def test_answer_is_escaped_before_formatting():
+    """The answer is model-authored; it must be escaped and only then given inline forms."""
+    html = _view_html()
+    assert "const src = esc(text);" in html
+    assert "Never insert it as raw HTML" in html
+
+
+# ── design + critique (the prototype loop) ────────────────────────────────────
+
+
+def _endpoint(path):
+    return next(r for r in ds._build_data_router().routes if r.path == path).endpoint
+
+
+def _run(path, body):
+    import asyncio
+
+    return asyncio.run(_endpoint(path)(body))
+
+
+def _fake_sdk(monkeypatch, result="<section class='pl-empty'>x</section>", capture=None):
+    import sys, types
+
+    async def fake(subagent_type, prompt, *, description, extra_tools=None, **kw):
+        if capture is not None:
+            capture.update(type=subagent_type, prompt=prompt, tools=[t.name for t in (extra_tools or [])])
+        return result
+
+    mod = types.ModuleType("graph.sdk")
+    mod.run_subagent = fake
+    monkeypatch.setitem(sys.modules, "graph.sdk", mod)
+
+
+def test_kit_classes_come_from_the_real_stylesheet(monkeypatch):
+    """A prototype can only use classes the kit actually ships — an invented `.pl-datepicker`
+    renders as an unstyled div, so the vocabulary is read, not assumed."""
+    monkeypatch.setattr(ds, "_KIT_CACHE", None, raising=False)
+    css = ".pl-btn{color:red}.pl-btn--primary{}.pl-empty .pl-heading{}#not-a-class{}"
+    monkeypatch.setattr(ds, "_gh_get_raw", lambda p: css)
+    assert ds._kit_classes(force=True) == ["pl-btn", "pl-btn--primary", "pl-empty", "pl-heading"]
+    out = _call(ds.ds_kit_classes)
+    assert "only these exist" in out and "pl-empty" in out
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("```html\n<div>a</div>\n```", "<div>a</div>"),
+        ("```\n<div>a</div>\n```", "<div>a</div>"),
+        ("<div>a</div>", "<div>a</div>"),
+        ("<div>a</div><script>alert(1)</script>", "<div>a</div>"),
+        ("<style>body{}</style><p>b</p>", "<p>b</p>"),
+    ],
+)
+def test_fragment_only_unwraps_and_strips(raw, expected):
+    """The subagent is told to return a bare fragment; this is the backstop for when it
+    doesn't. A <style> block would fight the kit stylesheet and the operator's theme."""
+    assert ds._fragment_only(raw) == expected
+
+
+@pytest.mark.parametrize("body", [{}, {"intent": "  "}, None])
+def test_design_rejects_an_empty_brief(body):
+    out = _run("/design", body)
+    assert out["ok"] is False and "Describe what" in out["error"]
+
+
+def test_design_injects_the_designer_tools_and_cleans_the_output(monkeypatch):
+    cap = {}
+    _fake_sdk(monkeypatch, result="[ds-designer completed: x]\n```html\n<p class='pl-lead'>hi</p>\n```", capture=cap)
+    out = _run("/design", {"intent": "an empty state"})
+    assert out["ok"] is True
+    assert out["html"] == "<p class='pl-lead'>hi</p>", "banner and fence must both be removed"
+    assert cap["type"] == "ds-designer"
+    assert {"ds_kit_classes", "ds_rules", "ds_tokens"} <= set(cap["tools"])
+
+
+def test_designer_allowlist_is_derived_from_the_injected_tools():
+    import sys, types
+
+    stub = types.ModuleType("graph.subagents.config")
+
+    class SubagentConfig:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    stub.SubagentConfig = SubagentConfig
+    sys.modules["graph.subagents.config"] = stub
+    cfg = ds._build_designer()
+    assert cfg.name == "ds-designer"
+    assert cfg.tools == [t.name for t in ds._designer_tools()]
+
+
+def test_critique_needs_something_to_review():
+    out = _run("/critique", {"code": ""})
+    assert out["ok"] is False and "design something first" in out["error"]
+
+
+def test_critique_tells_the_critic_it_is_reviewing_a_kit_prototype(monkeypatch):
+    """Without this the top finding is always 'use the React component API instead of .pl-*',
+    which is true of production code but not of a no-build prototype — it burns the most
+    valuable slot on the one thing that isn't a defect."""
+    cap = {}
+    _fake_sdk(monkeypatch, result="**Verdict: ship-ready**", capture=cap)
+    out = _run("/critique", {"code": "<p class='pl-lead'>hi</p>", "intent": "a lead line"})
+    assert out["ok"] is True and out["review"] == "**Verdict: ship-ready**"
+    assert cap["type"] == "design-critic"
+    assert "no-build" in cap["prompt"] and "not on the fact that it isn't React" in cap["prompt"]
+    assert "a lead line" in cap["prompt"]
+
+
+def test_prototype_preview_applies_the_kit_and_the_operator_theme():
+    html = _view_html()
+    assert "_ds/plugin-kit.css" in html
+    assert 'data-theme="${currentMode()}"' in html
+    assert 'sandbox="allow-same-origin"' in html
