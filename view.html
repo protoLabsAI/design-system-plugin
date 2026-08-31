@@ -4,13 +4,30 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Design System</title>
-<link rel="stylesheet" href="" id="ds-kit" />
+<!-- RELATIVE, deliberately: the kit lives at <base>/_ds/ where <base> is "" in the host
+     window and "/agents/<slug>" under the fleet proxy. "../../" resolves correctly in BOTH
+     from this page's own path, which a root-absolute "/_ds/..." would not. Kept in the HTML
+     rather than assigned from JS so the browser starts the fetch during parse and blocks
+     the first paint on it — an href filled in by script means the page paints once with NO
+     --pl-* tokens defined, i.e. white. (Depth is coupled to the view path; a test asserts it.) -->
+<link rel="stylesheet" href="../../_ds/plugin-kit.css" id="ds-kit" />
 <style>
+  /* Bootstrap ground — applies before the kit stylesheet resolves and whenever it can't.
+     The literals are the ONLY hardcoded colours in this file and exist purely so an
+     unstyled first paint lands on the right ground instead of white; the tokens win the
+     moment they exist. Follows the OS scheme, since the console's theme only arrives later
+     over the handshake. */
+  :root { color-scheme: dark; }
+  html { background: var(--pl-color-bg, #0a0a0c); }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; }
+    html { background: var(--pl-color-bg, #f6f7f9); }
+  }
   html, body { height: 100%; }
   body {
     margin: 0; display: flex; flex-direction: column;
     font-family: var(--pl-font-sans); font-size: var(--pl-font-base-size);
-    color: var(--pl-color-fg); background: var(--pl-color-bg);
+    color: var(--pl-color-fg); background: var(--pl-color-bg, transparent);
   }
   .bar {
     display: flex; align-items: center; gap: var(--pl-space-3);
@@ -104,12 +121,12 @@
      default canvas WHITE, which is the flash. Two defences, both from outside the frame:
      `color-scheme` below (so the pre-CSS canvas is painted in our mode, not white), and
      holding the frame hidden over a themed skeleton until it has actually painted. */
-  .well { position: relative; height: 180px; background: var(--pl-color-bg-raised); }
+  .well { position: relative; height: 180px; background: var(--pl-color-bg-raised, #131316); }
   .card.tall .well { height: 560px; }
   body.big .well, body.big .card.tall .well { height: 560px; }
   .well iframe {
     width: 100%; height: 100%; border: 0; display: block;
-    background: var(--pl-color-bg-raised);
+    background: var(--pl-color-bg-raised, #131316);
     /* Paints the embedded document's initial canvas in our scheme instead of white. */
     color-scheme: dark;
     opacity: 0;
@@ -118,7 +135,7 @@
   .card.ready .well iframe { opacity: 1; }
   .well .skel {
     position: absolute; inset: 0; display: grid; place-items: center;
-    background: var(--pl-color-bg-raised); pointer-events: none;
+    background: var(--pl-color-bg-raised, #131316); pointer-events: none;
   }
   .card.ready .well .skel { display: none; }
   .well .skel span {
@@ -162,7 +179,8 @@
 <script type="module">
 // Rule 3: derive the base so this works behind the /agents/<slug>/ fleet proxy too.
 const base = location.pathname.split("/plugins/")[0];
-document.getElementById("ds-kit").href = base + "/_ds/plugin-kit.css";
+// NOTE: the kit STYLESHEET is linked statically in the head (see the comment there) — do
+// not set its href from here, or the fetch restarts and the page paints untokenised first.
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
@@ -217,25 +235,48 @@ function syncMode() {
   document.body.classList.toggle("lightmode", currentMode() === "light");
 }
 
-// A cross-origin frame gives us `load` (but never its document), so that's the only honest
-// "it has painted" signal available. The timeout is the safety net: a story that 404s or
-// hangs must not leave a skeleton pulsing forever.
-const FRAME_TIMEOUT_MS = 10000;
+// Storybook is a CLIENT-RENDERED preview: `load` fires when the iframe document has
+// finished loading, but the story CSS is injected by its JS afterwards, so between `load`
+// and the first story paint the document is a blank WHITE page. Revealing on `load`
+// therefore shows that white — measured at ~290ms of it (load 391ms, storyRendered 683ms).
+//
+// So we reveal on Storybook's OWN render event, which it posts to us over its
+// `storybook-channel` postMessage protocol. `load` only starts a grace timer, so a
+// Storybook that doesn't speak the protocol still resolves instead of pulsing forever.
+const SB_DONE = new Set([
+  "storyRendered", "storyFinished", "storyMissing", "storyErrored", "storyThrewException",
+]);
+const GRACE_AFTER_LOAD_MS = 2500;
+const FRAME_TIMEOUT_MS = 12000;
+
+function markReady(frame) {
+  const card = frame && frame.closest(".card");
+  if (card) card.classList.add("ready");
+}
+
+// One listener for the whole page; each message is matched back to its frame by source
+// window. Registered once — re-registering per render would leak a listener per switch.
+window.addEventListener("message", (e) => {
+  const origin = DATA && DATA.meta && DATA.meta.storybook_url;
+  if (!origin || e.origin !== new URL(origin).origin) return;   // only our Storybook
+  let d = e.data;
+  if (typeof d === "string") { try { d = JSON.parse(d); } catch { return; } }
+  if (!d || d.key !== "storybook-channel" || !d.event || !SB_DONE.has(d.event.type)) return;
+  for (const frame of document.querySelectorAll("#components .well iframe")) {
+    if (frame.contentWindow === e.source) { markReady(frame); return; }
+  }
+});
+
 function revealFramesIn(host) {
   for (const frame of host.querySelectorAll(".well iframe")) {
-    const card = frame.closest(".card");
-    if (!card) continue;
-    const show = () => card.classList.add("ready");
-    // requestAnimationFrame: `load` fires when the document finished loading, which can be
-    // a frame BEFORE it is first painted — revealing on the raw event reintroduces a
-    // shorter flash of the same white.
-    frame.addEventListener("load", () => requestAnimationFrame(show), { once: true });
-    frame.addEventListener("error", show, { once: true });
-    setTimeout(show, FRAME_TIMEOUT_MS);
+    // Not a reveal on its own — just bounds how long we wait for storyRendered.
+    frame.addEventListener("load", () => setTimeout(() => markReady(frame), GRACE_AFTER_LOAD_MS), { once: true });
+    frame.addEventListener("error", () => markReady(frame), { once: true });
+    setTimeout(() => markReady(frame), FRAME_TIMEOUT_MS);
   }
 }
 
-// Stories that lay out a whole screen need room; a 260px card crops them into nonsense.
+// Stories that lay out a whole screen need room; a 180px card crops them into nonsense.
 const TALL = /app ?shell|full|conversation|thread|splash|palette|blog|mobile|rail|dock/i;
 
 function tokenChip(t) {

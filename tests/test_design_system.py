@@ -514,3 +514,60 @@ def test_view_router_serves_the_path_the_manifest_declares():
     manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "protoagent.plugin.yaml").read_text())
     declared = manifest["views"][0]["path"]
     assert declared == "/plugins/design-system" + next(r.path for r in ds._build_view_router().routes)
+
+
+# ── view page bootstrap ───────────────────────────────────────────────────────
+
+
+def _view_html() -> str:
+    return (Path(__file__).resolve().parent.parent / "view.html").read_text()
+
+
+def test_kit_stylesheet_is_linked_statically_not_assigned_from_js():
+    """An href filled in by script means the browser paints ONCE before the kit CSS is even
+    requested — with no --pl-* tokens defined, i.e. a full-page white flash (measured at
+    luminance 254 for ~90ms). The link must carry a real href in the markup."""
+    html = _view_html()
+    assert 'href="../../_ds/plugin-kit.css"' in html
+    assert 'href=""' not in html
+    assert '.href = base + "/_ds/plugin-kit.css"' not in html
+
+
+def test_relative_kit_href_depth_matches_the_declared_view_path():
+    """The `../../` depth is coupled to how deep the view path is. Move the view and the
+    stylesheet 404s, which degrades to an unstyled page rather than an error."""
+    import re
+
+    import yaml
+
+    manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "protoagent.plugin.yaml").read_text())
+    view_path = manifest["views"][0]["path"]              # e.g. /plugins/design-system/view
+    depth = len([seg for seg in view_path.strip("/").split("/")[:-1]])  # dirs above the page
+    hops = len(re.findall(r"\.\./", re.search(r'href="([^"]*_ds/plugin-kit\.css)"', _view_html()).group(1)))
+    assert hops == depth, f"view path is {depth} deep but the kit href climbs {hops}"
+
+
+def test_painted_surfaces_carry_a_literal_fallback():
+    """Until the kit resolves, every var(--pl-*) is undefined — and an undefined custom
+    property in a background is transparent, which paints white. The surfaces that cover
+    the viewport need a literal fallback so a slow or failed kit lands on the right ground."""
+    html = _view_html()
+    for surface in ("--pl-color-bg, #0a0a0c", "--pl-color-bg-raised, #131316"):
+        assert f"var({surface})" in html, f"missing fallback for {surface}"
+
+
+def test_frames_reveal_on_storybook_render_not_on_load():
+    """Storybook is client-rendered: `load` fires ~290ms BEFORE the story paints (measured
+    load 391ms / storyRendered 683ms), and the document is blank white in between. Revealing
+    on load put a one-frame flash of pure white in every card."""
+    html = _view_html()
+    assert "storyRendered" in html
+    assert 'd.key !== "storybook-channel"' in html
+    # `load` may only start the grace timer — never reveal directly.
+    assert "requestAnimationFrame(show)" not in html
+    assert "GRACE_AFTER_LOAD_MS" in html
+
+
+def test_message_listener_checks_the_origin():
+    """postMessage is receivable by anyone; only our configured Storybook may flip a card."""
+    assert "e.origin !== new URL(origin).origin" in _view_html()
