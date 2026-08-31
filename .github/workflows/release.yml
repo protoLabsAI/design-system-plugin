@@ -1,0 +1,31 @@
+name: Release
+
+# Thin caller for the fleet release ritual: tag → LLM-themed release notes → Discord embed →
+# GitHub release body. The logic lives in the reusable
+# protoLabsAI/release-tools/.github/workflows/plugin-release.yml, which reads the version
+# straight out of protoagent.plugin.yaml — so there is nothing to keep in lockstep here.
+#
+# Fires on a deliberate `chore: release vX.Y.Z` commit to main (feature PRs bump the manifest
+# version; the release commit is the cut that batches them) or a manual dispatch. Idempotent:
+# a re-run on a version whose tag already exists skips the tag + release creation.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Granted at the CALLER so it flows into the reusable workflow's GITHUB_TOKEN — a called
+# workflow can only downgrade the caller's token, never escalate. Without this, a read-only
+# org/repo default leaves the reusable workflow unable to tag or create the release.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Repo-specific fork guard; it can't live in the reusable workflow, which the whole fleet shares.
+    if: >-
+      github.repository == 'protoLabsAI/design-system-plugin' &&
+      (github.event_name == 'workflow_dispatch' ||
+       startsWith(github.event.head_commit.message, 'chore: release v'))
+    uses: protoLabsAI/release-tools/.github/workflows/plugin-release.yml@v2
+    secrets: inherit

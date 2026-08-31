@@ -824,3 +824,17 @@ def test_readme_documents_mcp_exposure_without_shipping_a_server():
     assert "register_mcp_server" in readme and "wrong seam" in readme
     src = (Path(__file__).resolve().parent.parent / "__init__.py").read_text()
     assert "register_mcp_server" not in src, "don't ship an MCP server; the host already exposes tools"
+
+
+def test_release_uses_the_shared_fleet_ritual():
+    """Releases go through release-tools' reusable workflow (tag → themed notes → Discord),
+    not a hand-run `gh release create` — and its fork guard must name THIS repo, or a fork
+    would cut releases against the upstream name."""
+    import yaml
+
+    wf = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "release.yml"
+    assert wf.is_file(), "no release workflow — releases would stay hand-cut"
+    job = yaml.safe_load(wf.read_text())["jobs"]["release"]
+    assert job["uses"].startswith("protoLabsAI/release-tools/.github/workflows/plugin-release.yml@")
+    assert "protoLabsAI/design-system-plugin" in job["if"]
+    assert "chore: release v" in job["if"]
