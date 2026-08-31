@@ -45,6 +45,9 @@ _DEFAULTS = {
     # The GENERATED css — the authoritative --pl-* var names. ds_tokens prefers this over
     # the JSON because a var name is what a consumer writes; the JSON only has token paths.
     "tokens_css_path": "packages/design-system/dist/tokens.css",
+    # The DS's no-build kit — the .pl-* class vocabulary a prototype can render with
+    # directly, no bundler. Grounds ds_design; blank disables the class list.
+    "kit_css_path": "packages/ui/dist/plugin-kit.css",
     "components_path": "packages/ui/src",
     "rules_path": "docs/reference/visual-identity.md",
     "watch_cron": "0 14 * * *",
@@ -194,6 +197,45 @@ def ds_rules() -> str:
         return _gh_get_raw(_cfg("rules_path"))
     except RuntimeError as e:
         return f"ds_rules error: {e}"
+
+
+# ── no-build class vocabulary ─────────────────────────────────────────────────
+
+_CLASS_RE = re.compile(r"\.(pl-[a-z0-9-]+)", re.I)
+_KIT_CACHE: tuple[float, list[str]] | None = None
+
+
+def _kit_classes(force: bool = False) -> list[str]:
+    """The ``.pl-*`` classes the DS's published kit CSS actually defines.
+
+    A prototype rendered with the kit can only use classes the kit ships; a plausible-looking
+    ``.pl-datepicker`` renders as an unstyled div. Reading the real stylesheet is the same
+    anti-drift move as reading the real tokens.
+    """
+    global _KIT_CACHE
+    import time
+
+    path = _cfg("kit_css_path")
+    if not path:
+        raise RuntimeError("no kit_css_path configured")
+    if not force and _KIT_CACHE and (time.time() - _KIT_CACHE[0]) < _SB_TTL:
+        return _KIT_CACHE[1]
+    names = sorted(set(_CLASS_RE.findall(_gh_get_raw(path))))
+    _KIT_CACHE = (time.time(), names)
+    return names
+
+
+@tool
+def ds_kit_classes() -> str:
+    """The design system's no-build CSS class vocabulary — every ``.pl-*`` class its published
+    kit stylesheet defines. Use when writing a PROTOTYPE that renders with the kit rather than
+    the React components: only these classes exist, and inventing a plausible one (.pl-datepicker)
+    renders as an unstyled div. Pair with ds_tokens for values and ds_rules for judgment."""
+    try:
+        names = _kit_classes()
+    except RuntimeError as e:
+        return f"ds_kit_classes error: {e}"
+    return f"Kit classes ({len(names)}) — only these exist:\n" + ", ".join(names)
 
 
 # ── token vocabulary (from the generated CSS) ─────────────────────────────────
@@ -506,6 +548,52 @@ def _build_explainer():
     )
 
 
+_DESIGNER_PROMPT = """You are the **design-system designer** — you turn a design intent into a working
+prototype built out of THIS system, so a person can look at it and react.
+
+Ground everything in the live system before you write a line of markup:
+- `ds_rules` — the visual-identity rules. What we do, and specifically what we don't.
+- `ds_kit_classes` — the ONLY `.pl-*` classes that exist. A plausible invention
+  (`.pl-datepicker`) renders as an unstyled div, so check before you use one.
+- `ds_tokens` — the `--pl-*` values. Never write a literal a token already defines.
+- `ds_stories` / `ds_story` — what the system already ships. If a component covers this,
+  compose it rather than rebuilding it.
+
+Return **one HTML fragment** and nothing else:
+- No `<html>`, `<head>`, `<body>`, no `<style>` block, no `<script>`. The kit stylesheet and the
+  operator's theme are already applied around your markup — a style block would fight them.
+- Structure with `.pl-*` classes. Inline `style="…"` ONLY for layout the kit has no class for
+  (a grid template, a gap), and only using `var(--pl-…)` values.
+- Semantic, accessible markup: real `<button>`/`<label>`/`<nav>`, labels tied to inputs, alt text,
+  a sensible heading order. This is a prototype of a component in a design system — shipping an
+  inaccessible one is shipping a bug.
+- Realistic content, not lorem ipsum. Plausible labels and copy make a prototype judgeable.
+
+If the intent is already covered by an existing component, build it FROM that component and say so
+in a leading HTML comment. If the system genuinely lacks what's needed, compose the nearest
+primitives and name the gap in that comment. Output the fragment only — no prose, no code fence."""
+
+
+def _designer_tools() -> list:
+    return [ds_rules, ds_kit_classes, ds_tokens, ds_stories, ds_story, ds_check]
+
+
+def _build_designer():
+    from graph.subagents.config import SubagentConfig
+
+    return SubagentConfig(
+        name="ds-designer",
+        description=(
+            "Turns a design intent into a working HTML prototype built from THIS design system's "
+            "real classes and tokens — for showing someone a new component, layout or styling idea "
+            "before it becomes code. Returns a fragment, not a page."
+        ),
+        system_prompt=_DESIGNER_PROMPT,
+        tools=[t.name for t in _designer_tools()],
+        max_turns=14,
+    )
+
+
 _WATCH_PROMPT = (
     "Design-system drift check. Call `ds_drift` to see what changed in @protolabsai/design and "
     "packages/ui since your last review. If tokens changed or components were added/removed, "
@@ -643,6 +731,22 @@ def _strip_subagent_banner(text: str) -> str:
     return _BANNER_RE.sub("", text or "", count=1).strip()
 
 
+_FENCE_RE = re.compile(r"^\s*```[a-z]*\s*\n(.*?)\n?\s*```\s*$", re.S | re.I)
+# A prototype is rendered in a sandboxed frame, but a <script> or a <style> would still fight
+# the kit stylesheet and the operator's theme — and the subagent is told not to emit them, so
+# stripping is the backstop for when it does anyway.
+_BLOCK_TAG_RE = re.compile(r"<(script|style)\b.*?</\1\s*>", re.S | re.I)
+
+
+def _fragment_only(text: str) -> str:
+    """Unwrap a code fence and drop script/style — the model was asked for a bare fragment."""
+    body = (text or "").strip()
+    m = _FENCE_RE.match(body)
+    if m:
+        body = m.group(1)
+    return _BLOCK_TAG_RE.sub("", body).strip()
+
+
 def _build_data_router():
     from fastapi import APIRouter
 
@@ -713,6 +817,58 @@ def _build_data_router():
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         return {"ok": True, "answer": _strip_subagent_banner(answer)}
 
+    @router.post("/design")
+    async def design(body: dict) -> dict:
+        """Build a prototype of a new component/layout out of this design system."""
+        intent = str((body or {}).get("intent") or "").strip()
+        if not intent:
+            return {"ok": False, "error": "Describe what you want designed."}
+        if len(intent) > 2000:
+            return {"ok": False, "error": "That brief is too long — trim it to 2000 characters."}
+        try:
+            from graph.sdk import run_subagent
+
+            html = await run_subagent(
+                "ds-designer", intent,
+                description="Prototype a component from the design system",
+                extra_tools=_designer_tools(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("[design-system] design failed")
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "html": _fragment_only(_strip_subagent_banner(html))}
+
+    @router.post("/critique")
+    async def critique(body: dict) -> dict:
+        """Review a prototype against the live system + a11y — the QA half of the loop."""
+        code = str((body or {}).get("code") or "").strip()
+        if not code:
+            return {"ok": False, "error": "Nothing to critique yet — design something first."}
+        try:
+            from graph.sdk import run_subagent
+
+            review = await run_subagent(
+                "design-critic",
+                # Tell it what it's looking at. Without this the top finding is always "use the
+                # React component API instead of .pl-* classes" — true of production code, but
+                # this is a no-build kit prototype where those classes ARE the correct output,
+                # so it burns the most valuable slot on the one thing that isn't a defect.
+                (
+                    "Review this PROTOTYPE. It is a no-build HTML fragment rendered with the design "
+                    "system's published kit stylesheet, so `.pl-*` classes are the intended output "
+                    "here — judge it on design-system fidelity, accessibility, layout and states, "
+                    "not on the fact that it isn't React. If the eventual production component "
+                    "should compose an existing component, note that once, briefly.\n\n"
+                    f"Intent: {str((body or {}).get('intent') or 'a design-system prototype')}\n\n{code}"
+                ),
+                description="Critique a design-system prototype",
+                extra_tools=_explainer_tools(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("[design-system] critique failed")
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "review": _strip_subagent_banner(review)}
+
     @router.post("/refresh")
     def refresh() -> dict:
         """Drop the Storybook cache so a DS deploy shows up without waiting out the TTL."""
@@ -733,11 +889,11 @@ def register(registry) -> None:
     registry.register_router(_build_view_router(), prefix="/plugins/design-system")
     # DATA: gated /api/plugins/design-system — fetched with the handshake token.
     registry.register_router(_build_data_router(), prefix="/api/plugins/design-system")
-    registry.register_tools([ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_rules, ds_check, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply])
+    registry.register_tools([ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_kit_classes, ds_rules, ds_check, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply])
 
     # design-critic subagent (ADR 0018) — reviews a prototype/component against the LIVE DS + a11y,
     # grounded via the ds_* tools above. The lead delegates to it with `task("design-critic", …)`.
-    for build in (_build_design_critic, _build_explainer):
+    for build in (_build_design_critic, _build_explainer, _build_designer):
         try:
             registry.register_subagent(build())
         except Exception:  # noqa: BLE001 — a registry hiccup must not break plugin load
@@ -756,4 +912,4 @@ def register(registry) -> None:
         except Exception:  # noqa: BLE001 — a scheduler hiccup must never break plugin load
             log.exception("[design-system] failed to arm the drift watch")
 
-    log.info("[design-system] registered 12 tools + design-critic/ds-explainer subagents (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
+    log.info("[design-system] registered 13 tools + design-critic/ds-explainer/ds-designer subagents (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")

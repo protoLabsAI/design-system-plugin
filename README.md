@@ -24,6 +24,7 @@ from the repo at call time** — the anti-drift principle, as tools.
 | `ds_stories` | the published Storybook inventory: every component and every variant name |
 | `ds_story <name>` | one component's variants, each with a **live render URL** you can show the user |
 | `ds_rules` | the visual-identity rules (when to use what, what we don't do) |
+| `ds_kit_classes` | the `.pl-*` classes the DS's published kit stylesheet actually defines — the vocabulary a no-build prototype can use |
 | `ds_check <css\|jsx>` | flags a hardcoded hex a token already defines → the token to use instead |
 | `ds_drift` | what changed since the last check (tokens + components); updates a snapshot |
 
@@ -47,6 +48,11 @@ The plugin serves a console view (**Design System** in the right rail) with two 
   comes back with the real variant, the real token, and a live preview link; "do we have a
   date picker?" comes back with *no*, plus the primitives to build one from. Answers are
   produced by the same subagent the agent uses in chat, so the pane can't drift from it.
+- **Design** — describe a component, layout or styling idea and get a working prototype built
+  out of this system's real classes and tokens, rendered live in a sandboxed frame with the
+  DS's own kit stylesheet and the operator's theme. **Critique** then runs it past
+  `design-critic` for a verdict and prioritised findings. Design → look at it → review, in one
+  place.
 
 **The gallery renders the design system's own published Storybook**, not a replica. The inventory
 comes from `index.json` and each card is an `<iframe>` onto that Storybook's `/iframe?id=<story>`.
@@ -79,6 +85,16 @@ Drives the **Ask** pane, and available in chat as `task("ds-explainer", …)`.
 > route injects the plugin's own tools as `extra_tools`; without that the call degrades to
 > `No tools available for subagent 'ds-explainer'` with nothing explaining why. The allowlist
 > is derived from that same list so the two can't drift.
+
+### `ds-designer`
+
+Turns a design intent into a working HTML prototype built from the system's real classes and
+tokens — a fragment, not a page. Grounded in `ds_kit_classes` specifically because a plausible
+invention (`.pl-datepicker`) renders as an unstyled div: only classes the kit actually ships
+will look like anything. Told to compose an existing component when one covers the case, and to
+name the gap in a leading comment when none does.
+
+Drives the **Design** pane; `task("ds-designer", …)` in chat.
 
 ### `design-critic` subagent
 
