@@ -1,0 +1,10 @@
+/* A dark product site: near-black ground, a violet brand, a pink secondary on CTAs. */
+body { background: #0b0b12; color: #e5e7eb; font-family: "Satoshi", -apple-system, sans-serif; }
+header { background-color: #11111a; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.cta, .button--primary { background-color: #7c3aed; color: #ffffff; border-radius: 12px; }
+.cta:hover { background-color: #6d28d9; }
+.button--secondary { background: #ec4899; color: #fff; border-radius: 12px; }
+a { color: #a78bfa; }
+.panel { background: #151522; border-radius: 12px; }
+.text-dim { color: hsl(220, 9%, 46%); }
+.tag { color: oklch(0.72 0.14 290); border: 1px solid #2a2a3a; }

@@ -1,0 +1,19 @@
+/* A light marketing site: white ground, a teal brand on buttons/links, slate text. */
+:root {
+  --brand-primary: #0f766e;
+  --brand-primary-hover: #115e59;
+  --color-bg: #ffffff;
+  --color-text: #1e293b;
+  --font-sans: "Inter", system-ui, sans-serif;
+}
+html, body { background-color: var(--color-bg); color: var(--color-text); font-family: var(--font-sans); }
+.nav a { color: var(--brand-primary); }
+.btn-primary { background: var(--brand-primary); color: #fff; border-radius: 6px; }
+.btn-primary:hover { background: var(--brand-primary-hover); }
+.card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; }
+.badge { border-radius: 9999px; background: #fef3c7; color: #92400e; }
+.footer { background: #0f172a; color: #cbd5e1; }
+.muted { color: #64748b; }
+.promo { border-left: 2px solid #f59e0b; }
+input { border-radius: 6px; border: 1px solid #cbd5e1; }
+@media (max-width: 600px) { .btn-primary { border-radius: 4px; } }

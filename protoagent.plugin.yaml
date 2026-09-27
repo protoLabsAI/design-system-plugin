@@ -55,11 +55,16 @@ settings:
 capabilities:
   # The repo via the GitHub contents API, plus whatever `storybook_url` points at — that one
   # is operator-set, so the default is declared and an operator who repoints it is choosing
-  # the new host knowingly.
-  network: ["api.github.com", "protocontent-storybook.pages.dev"]
-  # Writes: the drift snapshot + audit reports in the instance data dir. Reads: ds_audit_repo
-  # reads local checkouts ONLY under the onboarding root, registered projects/work folders, or
-  # the operator's `audit_roots` — never an arbitrary path.
+  # the new host knowingly. theme_extract ALSO fetches operator-supplied URLs: the page the
+  # operator names plus its same-site and common-CDN stylesheets (static GETs, size/time
+  # capped, public hosts only — loopback/private/tailnet addresses are refused, the connection
+  # is pinned to the vetted address, redirects re-checked). That host set can't be enumerated,
+  # and "*" would declare nothing — so it is named as a behavior.
+  network: ["api.github.com", "protocontent-storybook.pages.dev", "operator-supplied URLs + their same-site/CDN stylesheets (theme_extract)"]
+  # Writes: the drift snapshot, audit reports and generated themes (themes/*.theme.css|json,
+  # *.preview.html) in the instance data dir. Reads: ds_audit_repo reads local checkouts ONLY
+  # under the onboarding root, registered projects/work folders, or the operator's
+  # `audit_roots` — never an arbitrary path.
   filesystem: scoped
 
 # Auth: the GitHub contents API is read with GITHUB_TOKEN / GH_TOKEN from the env (protoContent

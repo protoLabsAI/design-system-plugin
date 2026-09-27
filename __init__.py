@@ -17,6 +17,7 @@ Tools:
   ds_check       — lint a snippet with the audit engine (colors, fallbacks, tokens, scales…)
   ds_audit_repo  — audit a LOCAL checkout for design-system adherence → lane-split report
   ds_drift       — what changed since the last check (tokens + components); updates a snapshot
+  theme_extract / theme_probe_script / theme_generate — brand → full dark+light theme on the live contract
 
 A recurring DRIFT WATCH (native scheduler) fires a turn on a cadence that calls ds_drift and,
 if the DS moved, has the agent sync docs/consumers (a PR) or hand the lead a finding.
@@ -617,13 +618,34 @@ def _allowed_roots() -> list[tuple[str, Path]]:
     return out
 
 
-def _data_dir() -> Path:
-    """Instance-scoped plugin data dir (ADR 0004). ``DESIGN_SYSTEM_DIR`` overrides the base;
-    ``PROTOAGENT_INSTANCE`` adds a per-member subdir so fleet members don't collide."""
-    base = Path(os.environ.get("DESIGN_SYSTEM_DIR") or (Path.home() / ".protoagent" / "design-system"))
+def _legacy_data_dir() -> Path:
+    """The pre-SDK location (``~/.protoagent/design-system[/<instance>]``) — wrong for a fleet
+    member whose instance root isn't under ~/.protoagent, kept only as a fallback + migration source."""
+    base = Path.home() / ".protoagent" / "design-system"
     inst = os.environ.get("PROTOAGENT_INSTANCE", "").strip()
-    if inst:
-        base = base / inst
+    return base / inst if inst else base
+
+
+def _data_dir() -> Path:
+    """This plugin's instance-scoped data dir (ADR 0004/0065).
+
+    ``DESIGN_SYSTEM_DIR`` overrides (tests, operators); otherwise the host's
+    ``graph.sdk.plugin_store`` — the instance root the host resolves via ``instance_paths()``
+    (``PROTOAGENT_HOME``), so the dev sandbox and every fleet member get their own copy. A host
+    older than that seam (< 0.148) falls back to the legacy home-dir path."""
+    override = os.environ.get("DESIGN_SYSTEM_DIR")
+    if override:
+        base = Path(override)
+        inst = os.environ.get("PROTOAGENT_INSTANCE", "").strip()
+        if inst:
+            base = base / inst
+    else:
+        try:
+            from graph.sdk import plugin_store
+
+            base = plugin_store(plugin_id="design-system")
+        except Exception:  # noqa: BLE001 — no host / older host: the legacy path still works
+            base = _legacy_data_dir()
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -767,8 +789,16 @@ def ds_audit_repo(path: str, include: str = "", exclude: str = "", rules: str = 
 
 
 def _snap_path() -> Path:
-    """Instance-scoped drift snapshot, in the plugin data dir (see ``_data_dir``)."""
-    return _data_dir() / "snapshot.json"
+    """Instance-scoped drift snapshot. Migrates a snapshot left at the legacy path once, so
+    moving to the SDK store doesn't cost the next drift check its baseline."""
+    p = _data_dir() / "snapshot.json"
+    legacy = _legacy_data_dir() / "snapshot.json"
+    if not p.exists() and legacy.exists() and legacy != p and not os.environ.get("DESIGN_SYSTEM_DIR"):
+        try:
+            p.write_text(legacy.read_text())
+        except OSError:
+            pass
+    return p
 
 
 def _fingerprint() -> dict:
@@ -1089,6 +1119,222 @@ def theme_apply(overrides_json: str, mode: str = "dark") -> str:
         return f"Error: persisting theme failed — {exc}"
 
 
+# ══ theme generation from a brand (themegen.py) ═══════════════════════════════
+# Extract brand signals from a site / CSS / rendered probe / hex list, then generate a
+# full dark + light theme against the LIVE token contract (every --pl-color-* var the
+# DS's tokens.css defines). Pure logic in themegen.py; the fetch + file seams live here.
+
+
+def _themegen_mod():
+    return _sibling("themegen.py")
+
+
+_TG_MAX_HTML = 2_000_000
+_TG_MAX_CSS = 1_500_000
+_TG_MAX_TOTAL = 5_000_000
+_TG_MAX_SHEETS = 10
+_TG_BUDGET_S = 30.0  # wall clock for the WHOLE extract (page + every stylesheet + redirects)
+
+
+def _fetch_mod():
+    return _sibling("fetch.py")
+
+
+def _tg_fetch(url: str, max_bytes: int, deadline: float) -> tuple[str, str]:
+    """GET ``url`` → (final_url, text) through the hardened fetcher (public hosts only, the
+    connection pinned to the vetted IP, redirects re-vetted, ``deadline`` a shared wall-clock
+    budget, decompression capped). Raises RuntimeError. The test seam for the URL path."""
+    return _fetch_mod().fetch_text(url, max_bytes=max_bytes, deadline=deadline, allow_offsite_hosts=True)
+
+
+def _tg_extract_url(url: str) -> dict:
+    """Static read of a site: the HTML + its same-site / common-CDN stylesheets (one level of
+    @import), size-capped, under ONE wall-clock deadline. No JavaScript runs."""
+    import time
+
+    tg = _themegen_mod()
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        url = "https://" + url
+    deadline = time.monotonic() + _TG_BUDGET_S
+    final, html = _tg_fetch(url, _TG_MAX_HTML, deadline)
+    assets = tg.site_assets(html, final)
+    css_parts = [assets["inline_css"]]
+    total = len(html)
+    fetched, skipped, failed = [], [], []
+    queue = list(assets["stylesheets"])
+    seen: set[str] = set()
+    while queue and len(fetched) < _TG_MAX_SHEETS:
+        sheet = queue.pop(0)
+        if sheet in seen:
+            continue
+        seen.add(sheet)
+        if not tg.stylesheet_allowed(sheet, final):
+            skipped.append(sheet)
+            continue
+        if time.monotonic() >= deadline or total > _TG_MAX_TOTAL:
+            skipped.append(sheet)
+            continue
+        try:
+            _, css = _tg_fetch(sheet, _TG_MAX_CSS, deadline)
+        except RuntimeError as e:
+            failed.append(f"{sheet} ({e})")
+            continue
+        total += len(css)
+        fetched.append(sheet)
+        css_parts.append(css)
+        queue.extend(u for u in tg.css_imports(css, sheet) if u not in seen)
+    res = tg.extract_from_css("\n".join(css_parts), theme_color_meta=assets["theme_color"], source="url", sheets_fetched=len(fetched))
+    res["url"] = final
+    res["notes"].append(f"static read: HTML + {len(fetched)} stylesheet(s); {len(skipped)} skipped (off-site or over budget), {len(failed)} failed")
+    res["notes"].append(
+        "no JavaScript ran — for a JS-rendered site (SPA, CSS-in-JS) a RENDERED probe is far more "
+        "accurate: call theme_probe_script, run it with browser_eval on the page, pass the JSON here"
+    )
+    return res
+
+
+@tool
+def theme_extract(source: str) -> str:
+    """Pull a brand's colors, fonts and radius out of a site or brand material — the first step
+    of theming from a brand. ``source`` is ONE of:
+
+    - a URL (``https://acme.com`` or ``acme.com``) — a STATIC read: the HTML plus its same-site
+      and common-CDN stylesheets, size/time capped, no JavaScript executed;
+    - raw CSS text;
+    - the JSON a rendered probe returned (see ``theme_probe_script`` — best for JS-rendered sites);
+    - a comma list of brand hex colors (``#0f766e, #f59e0b``) — first is primary.
+
+    Returns a RANKED report: brand color candidates, each with its score and the evidence it came
+    from (which property/selector/custom property), neutrals, the likely ground (dark or light
+    site) and text color, font stacks, radius mode, and SUGGESTED SEEDS with a confidence. If the
+    confidence is not "high", confirm the primary with the operator before ``theme_generate``."""
+    tg = _themegen_mod()
+    s = (source or "").strip()
+    if not s:
+        return "theme_extract: pass a URL, CSS text, a probe JSON, or a comma list of hex colors."
+    kind = tg.classify_source(s)
+    try:
+        if kind == "url":
+            res = _tg_extract_url(s)
+        elif kind == "probe":
+            res = tg.extract_from_computed(s)
+        elif kind == "colors":
+            res = tg.extract_from_colors(s)
+        else:
+            res = tg.extract_from_css(s)
+    except RuntimeError as e:
+        return f"theme_extract error: {e}"
+    except (ValueError, json.JSONDecodeError) as e:
+        return f"theme_extract error: could not read the {kind} input ({e})"
+    return tg.format_extraction(res)
+
+
+@tool
+def theme_probe_script() -> str:
+    """The in-page probe for a RENDERED brand read — better than a static URL read for
+    JS-rendered sites (SPAs, CSS-in-JS, Tailwind JIT). Workflow: open the site with the browser
+    tools (``browser_open``), run the returned expression with ``browser_eval``, then pass the
+    JSON string it returns to ``theme_extract``. It samples visible elements' computed colors
+    weighted by RENDERED area, the :root custom properties, fonts and radii, and stays < ~20KB."""
+    tg = _themegen_mod()
+    return (
+        "Run this with browser_eval on the target page (after browser_open), then call "
+        "theme_extract(source=<the JSON string it returns>):\n\n" + tg.PROBE_JS
+    )
+
+
+def _themes_dir() -> Path:
+    """Generated themes live in the plugin's instance data dir, under ``themes/``."""
+    d = _data_dir() / "themes"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+_THEME_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
+THEME_PREVIEW_ROUTE = "/plugins/design-system/themes/{name}/preview"
+
+
+@tool
+def theme_generate(primary: str, secondary: str = "", neutral: str = "", name: str = "brand", scope: str = ":root", font_family: str = "", radius: str = "") -> str:
+    """Generate a complete DARK + LIGHT theme from brand seeds, against the design system's LIVE
+    token contract: every ``--pl-color-*`` var the DS's tokens.css defines gets a value in both
+    themes (surfaces keep the DS's elevation relation, neutrals are tinted toward the brand hue,
+    the accent is stepped per theme until it clears AA, status colors are harmonized but kept
+    recognizable, chart series are rotated onto the brand and kept distinguishable). Every
+    text/ground pair is WCAG-checked (4.5:1 text, 3:1 tertiary/UI) and repaired by nudging
+    lightness — each repair is reported.
+
+    Args: ``primary`` (required, any opaque CSS color — usually theme_extract's suggested
+    primary); ``secondary`` (optional second brand family); ``neutral`` (optional gray whose hue
+    tints surfaces); ``name`` (letters/digits/-/_); ``scope`` — ``:root`` to replace the default
+    theme, or a selector such as ``[data-brand="acme"]`` (comma lists allowed) for a white-label
+    scope; ``font_family`` (a plain font stack — names, commas, quotes only) / ``radius`` (a
+    number, px or rem) override the DS's --pl-font-sans / --pl-radius.
+
+    Returns: key tokens, the contrast summary, every adjustment/repair, then THREE hand-offs —
+    (1) a compact HTML preview between ``<<<ARTIFACT_HTML`` / ``ARTIFACT_HTML>>>`` to pass
+    verbatim as ``show_artifact(kind="html", code=…)`` (it styles itself with the DS kit the
+    artifact sandbox loads); (2) ``theme_apply`` maps (``dark`` / ``light`` JSON, colors + font/
+    radius) to pass as ``overrides_json``; (3) the full preview's console URL (with the contrast
+    table) for the operator to open. Also writes ``<name>.theme.css`` (the DS's 4-block shape;
+    load AFTER tokens.css), ``<name>.theme.json`` and ``<name>.preview.html`` to the plugin's
+    instance data dir, for a PR into a consumer repo."""
+    tg, tk = _themegen_mod(), _tokens_mod()
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", name or "brand").strip("-")[:48] or "brand"
+    try:
+        seeds = tg.seeds_from_brand(primary, secondary, neutral)
+    except ValueError as e:
+        return f"theme_generate error: {e}"
+    try:
+        contract = tk.parse_css(_gh_get_raw(_cfg("tokens_css_path")))
+    except RuntimeError as e:
+        return f"theme_generate error: could not read the token contract — {e}"
+    try:
+        theme = tg.generate(seeds, contract, name=safe, font_family=font_family, radius=radius)
+        css = tg.render_css(theme, scope)
+    except ValueError as e:
+        return f"theme_generate error: {e}"
+    d = _themes_dir()
+    paths = {"css": d / f"{safe}.theme.css", "json": d / f"{safe}.theme.json", "preview": d / f"{safe}.preview.html"}
+    try:
+        paths["css"].write_text(css, encoding="utf-8")
+        paths["json"].write_text(tg.render_json(theme), encoding="utf-8")
+        paths["preview"].write_text(tg.preview_html(theme), encoding="utf-8")
+    except OSError as e:
+        return f"theme_generate error: could not write the theme files ({e})"
+
+    lines = [f"Theme '{safe}' — {len(theme['dark'])} --pl-color-* vars × dark + light, scope {scope}"]
+    lines.append(f"seeds: primary {seeds['primary']}" + (f", secondary {seeds['secondary']}" if seeds["secondary"] else "") + (f", neutral {seeds['neutral']}" if seeds["neutral"] else ""))
+    lines.append("\nKey tokens (dark | light):")
+    for short, dv, lv in tg.summary_tokens(theme):
+        lines.append(f"  {short:<16} {dv:<24} {lv}")
+    if theme["base"]:
+        lines.append("  " + ", ".join(f"{k}: {v}" for k, v in theme["base"].items()))
+    lines.append("\nContrast:\n" + tg.contrast_report(theme, only_notable=True))
+    fixes = theme["adjustments"] + theme["repairs"]
+    if fixes:
+        lines.append("\nAdjustments & repairs:")
+        for r in fixes:
+            lines.append(f"  {r['theme']} {str(r['var']).removeprefix('--pl-color-')}: {r['from']} → {r['to']} — {r['reason']}")
+    for n in theme.get("notes", []):
+        lines.append(f"note: {n}")
+    if theme["passthrough"]:
+        lines.append("left at DS default (not a literal color): " + ", ".join(theme["passthrough"]))
+    lines.append(
+        "\n1) SHOW IT — call show_artifact(kind=\"html\", title=\"" + safe + " theme\", code=<everything between the markers>):"
+    )
+    lines.append("<<<ARTIFACT_HTML\n" + tg.preview_html(theme, compact=True) + "\nARTIFACT_HTML>>>")
+    apply_maps = tg.apply_maps(theme)
+    lines.append("\n2) APPLY TO THIS CONSOLE — theme_apply(overrides_json=<one map>, mode=\"dark\"|\"light\"):")
+    lines.append("theme_apply dark: " + json.dumps(apply_maps["dark"], separators=(",", ":")))
+    lines.append("theme_apply light: " + json.dumps(apply_maps["light"], separators=(",", ":")))
+    lines.append(
+        f"\n3) FULL PREVIEW with the contrast table (open in the console's browser): {THEME_PREVIEW_ROUTE.format(name=safe)}"
+    )
+    lines.append("Files (for a PR into a consumer repo — load the .theme.css AFTER tokens.css):\n" + "\n".join(f"  {k}: {p}" for k, p in paths.items()))
+    return "\n".join(lines)
+
+
 # ── console view: the design-system explorer ──────────────────────────────────
 # The gallery renders the DS's OWN published Storybook (one iframe per story), so what an
 # operator browses here is the real library at its current commit — not a replica this
@@ -1106,6 +1352,21 @@ def _build_view_router():
     @router.get("/view", include_in_schema=False)
     def view() -> HTMLResponse:
         return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    @router.get("/themes/{name}/preview", include_in_schema=False)
+    def theme_preview(name: str) -> HTMLResponse:
+        """A generated theme's full preview — public like the view page (an iframe/tab
+        navigation carries no bearer). The name is allowlisted, so no path can escape the
+        themes dir; the page holds only colors, and is served with a CSP that runs no script."""
+        if not _THEME_NAME_RE.match(name or ""):
+            return HTMLResponse("bad theme name", status_code=400)
+        f = _themes_dir() / f"{name}.preview.html"
+        if not f.is_file():
+            return HTMLResponse(f"no generated theme named {name!r} — run theme_generate first", status_code=404)
+        return HTMLResponse(
+            f.read_text(encoding="utf-8"),
+            headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'self'"},
+        )
 
     return router
 
@@ -1193,7 +1454,7 @@ def register(registry) -> None:
     registry.register_router(_build_view_router(), prefix="/plugins/design-system")
     # DATA: gated /api/plugins/design-system — fetched with the handshake token.
     registry.register_router(_build_data_router(), prefix="/api/plugins/design-system")
-    registry.register_tools([ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_search, ds_kit_classes, ds_rules, ds_check, ds_audit_repo, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply])
+    registry.register_tools([ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_search, ds_kit_classes, ds_rules, ds_check, ds_audit_repo, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply, theme_extract, theme_probe_script, theme_generate])
 
     # design-critic subagent (ADR 0018) — reviews a prototype/component against the LIVE DS + a11y,
     # grounded via the ds_* tools above. The lead delegates to it with `task("design-critic", …)`.
@@ -1216,4 +1477,4 @@ def register(registry) -> None:
         except Exception:  # noqa: BLE001 — a scheduler hiccup must never break plugin load
             log.exception("[design-system] failed to arm the drift watch")
 
-    log.info("[design-system] registered 15 tools + design-critic/ds-explainer/ds-designer subagents (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
+    log.info("[design-system] registered 18 tools + design-critic/ds-explainer/ds-designer subagents (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
