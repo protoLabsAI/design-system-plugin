@@ -130,3 +130,94 @@ def interp_lch(stops, t: float):
     (l1, c1, h1), (l2, c2, h2) = stops[seg], stops[seg + 1]
     dh = ((h2 - h1 + 180) % 360) - 180
     return (l1 + (l2 - l1) * lt, c1 + (c2 - c1) * lt, (h1 + dh * lt) % 360)
+
+
+# ── additive: CIELAB + ΔE2000 + OKLab/OKLCH decode (used by vocab.py / audit.py) ──
+# Kept separate from the LCH helpers above so theme.py's behaviour is untouched.
+
+
+def rgb_to_lab(rgb) -> tuple[float, float, float]:
+    """sRGB 0..1 → CIELAB (L, a, b), D65."""
+    x, y, z = _rgb_to_xyz(rgb)
+    fx, fy, fz = _f(x / _D65[0]), _f(y / _D65[1]), _f(z / _D65[2])
+    return (116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz))
+
+
+def delta_e_76(lab1, lab2) -> float:
+    """CIE76 — plain Euclidean distance in LAB. Cheap; overstates saturated differences."""
+    return sum((p - q) ** 2 for p, q in zip(lab1, lab2)) ** 0.5
+
+
+def delta_e_2000(lab1, lab2) -> float:
+    """CIEDE2000 (Sharma et al. 2005 reference formulation). ~1 = just noticeable,
+    <2 = same color to most eyes, >10 = clearly a different color."""
+    import math
+
+    L1, a1, b1 = lab1
+    L2, a2, b2 = lab2
+    c1, c2 = math.hypot(a1, b1), math.hypot(a2, b2)
+    cbar7 = ((c1 + c2) / 2) ** 7
+    g = 0.5 * (1 - math.sqrt(cbar7 / (cbar7 + 25 ** 7)))
+    a1p, a2p = (1 + g) * a1, (1 + g) * a2
+    c1p, c2p = math.hypot(a1p, b1), math.hypot(a2p, b2)
+    h1p = math.degrees(math.atan2(b1, a1p)) % 360 if c1p else 0.0
+    h2p = math.degrees(math.atan2(b2, a2p)) % 360 if c2p else 0.0
+    dLp = L2 - L1
+    dCp = c2p - c1p
+    if c1p * c2p == 0:
+        dhp = 0.0
+    else:
+        dhp = h2p - h1p
+        if dhp > 180:
+            dhp -= 360
+        elif dhp < -180:
+            dhp += 360
+    dHp = 2 * math.sqrt(c1p * c2p) * math.sin(math.radians(dhp / 2))
+    Lbp = (L1 + L2) / 2
+    Cbp = (c1p + c2p) / 2
+    if c1p * c2p == 0:
+        hbp = h1p + h2p
+    elif abs(h1p - h2p) <= 180:
+        hbp = (h1p + h2p) / 2
+    elif h1p + h2p < 360:
+        hbp = (h1p + h2p + 360) / 2
+    else:
+        hbp = (h1p + h2p - 360) / 2
+    t = (
+        1
+        - 0.17 * math.cos(math.radians(hbp - 30))
+        + 0.24 * math.cos(math.radians(2 * hbp))
+        + 0.32 * math.cos(math.radians(3 * hbp + 6))
+        - 0.20 * math.cos(math.radians(4 * hbp - 63))
+    )
+    d_theta = 30 * math.exp(-(((hbp - 275) / 25) ** 2))
+    rc = 2 * math.sqrt(Cbp ** 7 / (Cbp ** 7 + 25 ** 7))
+    sl = 1 + (0.015 * (Lbp - 50) ** 2) / math.sqrt(20 + (Lbp - 50) ** 2)
+    sc = 1 + 0.045 * Cbp
+    sh = 1 + 0.015 * Cbp * t
+    rt = -math.sin(math.radians(2 * d_theta)) * rc
+    return math.sqrt(
+        (dLp / sl) ** 2 + (dCp / sc) ** 2 + (dHp / sh) ** 2 + rt * (dCp / sc) * (dHp / sh)
+    )
+
+
+def oklab_to_rgb(lab) -> tuple[float, float, float]:
+    """OKLab (L 0..1, a, b) → sRGB 0..1 (unclamped; clamp before hex)."""
+    L, a, b = lab
+    l_ = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
+    m_ = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
+    s_ = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3
+    lin = (
+        4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_,
+        -1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_,
+        -0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_,
+    )
+    return tuple(_linear_to_srgb(c) if c >= 0 else -_linear_to_srgb(-c) for c in lin)  # type: ignore[return-value]
+
+
+def oklch_to_rgb(lch) -> tuple[float, float, float]:
+    """OKLCH (L 0..1, C, h°) → sRGB 0..1 (unclamped)."""
+    import math
+
+    L, C, h = lch
+    return oklab_to_rgb((L, C * math.cos(math.radians(h)), C * math.sin(math.radians(h))))

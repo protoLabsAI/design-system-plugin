@@ -1,0 +1,28 @@
+/* A consumer stylesheet with one of everything. #123456 in a comment is ignored. */
+:root {
+  --brand-indigo: #6366f1;
+  --app-gutter: 8px;
+}
+
+.card {
+  color: #9b87f2;
+  background: var(--pl-color-bg, #111114);
+  border: 1px solid var(--pl-color-border, rgba(255, 255, 255, 0.08));
+  padding: 8px 10px;
+  font-size: 13px;
+  border-radius: 6px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.title { color: var(--pl-color-fgg); font-size: 12px; }
+
+.danger { color: var(--pl-color-status-error, #e5484d); }
+
+.chip { color: #abcdef; } /* ds-audit-ignore */
+/* ds-audit-ignore-next-line raw-color */
+.chip-2 { color: #abcdef; }
+
+.x .pl-button { border-radius: 4px; }
+.pl-markdown pre { margin: 0; }
+
+.logo { background: url("data:image/svg+xml,%3Csvg fill='%23ff0000'/%3E"); }

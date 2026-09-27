@@ -1,6 +1,6 @@
 id: design-system
 name: Design System
-version: 0.7.1
+version: 0.8.0
 
 # The newest host seam this plugin depends on: TYPED `emits:` contracts (#1636, core 0.99.0).
 # `registry.emit` itself landed in 0.31.0 and `views[].palette` in 0.71.0, so 0.99.0 is the
@@ -13,7 +13,11 @@ description: >-
   FROM the source, so the current design vocabulary is never a stale copy frozen in knowledge.
   Tools: search components/variants/tokens; read tokens, rules, the Storybook inventory and a
   component's variants (with live preview URLs); lint code against the token vocabulary
-  (ds_check); and a recurring DRIFT WATCH that broadcasts when the system moves. Subagents:
+  (ds_check); AUDIT a whole local checkout for design-system adherence (ds_audit_repo — raw
+  colors, stale var() fallbacks, unknown tokens, off-scale lengths, .pl-* overrides, legacy
+  aliases, hand-rolled controls, shadow components, foreign UI kits → a 0-100 score and a
+  report split into DS gaps vs consumer fixes); and a recurring DRIFT WATCH that broadcasts
+  when the system moves. Subagents:
   ds-explainer answers questions about the system, ds-designer prototypes new components and
   renders them through the artifact plugin, design-critic reviews them against the live system
   and WCAG. The console view browses tokens and components — the gallery renders the design
@@ -35,6 +39,9 @@ config:
   storybook_url: https://protocontent-storybook.pages.dev
   rules_path: docs/reference/visual-identity.md           # the when-to-use / what-we-don't-do rules
   watch_cron: "0 14 * * *"            # daily 14:00 UTC drift check; "" = watch off
+  # Extra directories ds_audit_repo may read, beyond the host's project-onboarding root and
+  # registered projects / work folders (which are always allowed). Empty = only those.
+  audit_roots: []
 
 # Settings (ADR 0019) — editable in the console.
 settings:
@@ -42,6 +49,7 @@ settings:
   - {key: ref, label: "Git ref", type: string}
   - {key: storybook_url, label: "Published Storybook URL", type: string, description: "Root of the design system's deployed Storybook — powers the Components gallery. Blank turns the gallery off."}
   - {key: watch_cron, label: "Drift-watch cron (blank = off)", type: string}
+  - {key: audit_roots, label: "Extra audit roots", type: string_list, description: "Directories ds_audit_repo may read in addition to the onboarding root and registered projects (one per line)."}
 
 # Declarative transparency (shown in the console).
 capabilities:
@@ -49,7 +57,10 @@ capabilities:
   # is operator-set, so the default is declared and an operator who repoints it is choosing
   # the new host knowingly.
   network: ["api.github.com", "protocontent-storybook.pages.dev"]
-  filesystem: scoped            # one small drift snapshot in the instance data dir
+  # Writes: the drift snapshot + audit reports in the instance data dir. Reads: ds_audit_repo
+  # reads local checkouts ONLY under the onboarding root, registered projects/work folders, or
+  # the operator's `audit_roots` — never an arbitrary path.
+  filesystem: scoped
 
 # Auth: the GitHub contents API is read with GITHUB_TOKEN / GH_TOKEN from the env (protoContent
 # is private). Same token the github plugin uses; no separate plugin secret.
