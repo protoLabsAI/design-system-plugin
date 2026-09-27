@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Acme Console (on the DS)</title>
+<style>
+/* A consumer that loads the DS tokens — with one drifted value and one squatter. */
+:root { color-scheme: dark;
+  --pl-color-bg: #0a0a0c; --pl-color-fg: #ededed; --pl-color-accent: #8f7ae8;
+  --pl-color-brand-indigo: #6366f1; --pl-color-border: rgba(255, 255, 255, 0.08);
+  --pl-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.35); --pl-radius: 4px; --pl-motion-base: .2s;
+  --pl-space-1: 4px; --pl-space-2: 8px; --pl-space-3: 12px; --pl-space-4: 16px;
+  --pl-color-brandish: #ff00aa; }
+body { margin: 0; background: var(--pl-color-bg); color: var(--pl-color-fg); font: 14px/1.5 "Geist", system-ui, sans-serif; }
+header.pl-header { display: flex; align-items: center; gap: 16px; padding: 12px 16px; border-bottom: 1px solid var(--pl-color-border); }
+nav.top a { color: var(--pl-color-fg); text-decoration: none; padding: 4px 8px; }
+.pl-btn { background: var(--pl-color-accent); color: #0a0a0c; border: 0; border-radius: 4px; padding: 8px 16px; font-size: 14px; height: 36px; }
+.pl-btn--sm { height: 28px; padding: 4px 12px; font-size: 12px; }
+.pl-btn--ghost { background: transparent; color: var(--pl-color-fg); border: 1px solid var(--pl-color-border); }
+.icon-btn { width: 32px; height: 32px; border-radius: 4px; background: #1c1c22; border: 0; color: #ededed; }
+main { padding: 24px; }
+.breadcrumb { display: flex; gap: 8px; list-style: none; padding: 0; margin: 0 0 16px; font-size: 13px; }
+.breadcrumb li + li::before { content: "/"; margin-right: 8px; color: #666; }
+.breadcrumb a { color: #9b87f2; }
+.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+.pl-card { background: #121216; border: 1px solid var(--pl-color-border); border-radius: 6px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
+.pl-card h3 { margin: 0 0 8px; font-size: 15px; }
+.pl-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; background: #1f3b2a; color: #6dba70; }
+.pl-badge--square { border-radius: 3px; background: #3b1f1f; color: #e46b6b; }
+.muted { color: #777; background: #888; padding: 4px; }
+.tabs { display: flex; gap: 4px; margin: 24px 0 12px; }
+.tabs [role=tab] { background: transparent; border: 0; color: #a0a0a8; padding: 6px 12px; border-radius: 4px; }
+.tabs [aria-selected=true] { background: #1c1c22; color: #ededed; }
+.pagination { display: flex; gap: 4px; list-style: none; padding: 0; }
+.pagination a { display: inline-block; min-width: 28px; text-align: center; padding: 4px; border: 1px solid #2a2a31; border-radius: 4px; color: #ededed; text-decoration: none; }
+.clicky { cursor: pointer; padding: 10px; background: #15151a; margin-top: 12px; }
+form { display: grid; gap: 8px; max-width: 320px; margin-top: 16px; }
+input { background: #0f0f12; color: #ededed; border: 1px solid #2a2a31; border-radius: 4px; padding: 6px 8px; font-size: 13px; }
+</style></head>
+<body>
+<header class="pl-header"><strong>Acme</strong>
+  <nav class="top" aria-label="Main"><a href="/runs">Runs</a><a href="/agents">Agents</a><a href="/settings">Settings</a></nav>
+  <button class="pl-btn pl-btn--sm">New run</button><button class="icon-btn"><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="currentColor"/></svg></button><button class="icon-btn"><svg width="16" height="16"><rect x="2" y="2" width="12" height="12" fill="currentColor"/></svg></button><button class="icon-btn" aria-label="Help"><svg width="16" height="16"><path d="M2 8h12" stroke="currentColor"/></svg></button>
+</header>
+<main>
+  <nav aria-label="Breadcrumb"><ol class="breadcrumb"><li><a href="/">Home</a></li><li><a href="/runs">Runs</a></li><li><a href="/runs/42">Run 42</a></li></ol></nav>
+  <div class="tabs" role="tablist"><button role="tab" aria-selected="true">Overview</button><button role="tab" aria-selected="false">Logs</button><button role="tab" aria-selected="false">Artifacts</button></div>
+  <div class="grid">
+    <article class="pl-card"><h3>Build</h3><p>Compiled in 42s</p><span class="pl-badge">passing</span></article>
+    <article class="pl-card"><h3>Tests</h3><p>812 of 812</p><span class="pl-badge">passing</span></article>
+    <article class="pl-card"><h3>Lint</h3><p>3 warnings</p><span class="pl-badge pl-badge--square">failing</span></article>
+    <article class="pl-card"><h3>Deploy</h3><p>Waiting on review</p><span class="pl-badge">queued</span></article>
+  </div>
+  <p class="muted">Low contrast footnote text on a grey block.</p>
+  <div style="margin-top: 16px; display: flex; gap: 8px"><button class="pl-btn">Approve</button><button class="pl-btn pl-btn--ghost">Reject</button><button class="pl-btn" disabled>Merge</button><button class="pl-btn pl-btn--sm pl-btn--ghost">Details</button></div>
+  <div class="clicky">Row one — clickable div</div><div class="clicky">Row two — clickable div</div>
+  <form><label>Name <input name="name" placeholder="run name"></label><label>Owner <input name="owner"></label><input name="ghost"></form>
+  <ul class="pagination" aria-label="Pagination"><li><a href="?p=1">1</a></li><li><a href="?p=2">2</a></li><li><a href="?p=3">3</a></li><li><a href="?p=4">4</a></li></ul>
+</main></body></html>
