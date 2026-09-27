@@ -1,6 +1,6 @@
 id: design-system
 name: Design System
-version: 0.8.0
+version: 0.9.0
 
 # The newest host seam this plugin depends on: TYPED `emits:` contracts (#1636, core 0.99.0).
 # `registry.emit` itself landed in 0.31.0 and `views[].palette` in 0.71.0, so 0.99.0 is the
@@ -16,7 +16,10 @@ description: >-
   (ds_check); AUDIT a whole local checkout for design-system adherence (ds_audit_repo — raw
   colors, stale var() fallbacks, unknown tokens, off-scale lengths, .pl-* overrides, legacy
   aliases, hand-rolled controls, shadow components, foreign UI kits → a 0-100 score and a
-  report split into DS gaps vs consumer fixes); and a recurring DRIFT WATCH that broadcasts
+  report split into DS gaps vs consumer fixes); AUDIT a live SITE (ds_audit_url — from a rendered
+  in-browser probe the agent runs with browser_eval, or a static fetch) and break it down into
+  the components the DS covers, lacks variants for, or is missing (ds_component_gaps); and a
+  recurring DRIFT WATCH that broadcasts
   when the system moves. Subagents:
   ds-explainer answers questions about the system, ds-designer prototypes new components and
   renders them through the artifact plugin, design-critic reviews them against the live system
@@ -55,16 +58,21 @@ settings:
 capabilities:
   # The repo via the GitHub contents API, plus whatever `storybook_url` points at — that one
   # is operator-set, so the default is declared and an operator who repoints it is choosing
-  # the new host knowingly. theme_extract ALSO fetches operator-supplied URLs: the page the
-  # operator names plus its same-site and common-CDN stylesheets (static GETs, size/time
-  # capped, public hosts only — loopback/private/tailnet addresses are refused, the connection
-  # is pinned to the vetted address, redirects re-checked). That host set can't be enumerated,
-  # and "*" would declare nothing — so it is named as a behavior.
-  network: ["api.github.com", "protocontent-storybook.pages.dev", "operator-supplied URLs + their same-site/CDN stylesheets (theme_extract)"]
-  # Writes: the drift snapshot, audit reports and generated themes (themes/*.theme.css|json,
-  # *.preview.html) in the instance data dir. Reads: ds_audit_repo reads local checkouts ONLY
-  # under the onboarding root, registered projects/work folders, or the operator's
-  # `audit_roots` — never an arbitrary path.
+  # the new host knowingly.
+  #
+  # `operator-supplied-urls` below is a TOKEN, not a host: two tools fetch URLs the operator or
+  # agent names, whose host set can't be enumerated ("*" would declare nothing):
+  #   - theme_extract reads a page + its same-site / common-CDN stylesheets;
+  #   - ds_audit_url's STATIC mode reads a page + the stylesheets it links (≤ 10, size/time capped).
+  #   (ds_audit_url's rendered mode fetches nothing itself — the browser plugin does.)
+  # Both go through fetch.py: globally-routable addresses only (loopback, RFC 1918, link-local,
+  # CGNAT/Tailscale and v4-in-v6 forms of them are refused), the connection pinned to the vetted
+  # address, every redirect re-checked, one wall-clock deadline, decompressed size capped.
+  network: ["api.github.com", "protocontent-storybook.pages.dev", "operator-supplied-urls"]
+  # Writes: the drift snapshot, audit + gap reports (audits/, gaps/) and generated themes
+  # (themes/*.theme.css|json, *.preview.html) in the instance data dir. Reads: ds_audit_repo reads
+  # local checkouts ONLY under the onboarding root, registered projects/work folders, or the
+  # operator's `audit_roots` — never an arbitrary path.
   filesystem: scoped
 
 # Auth: the GitHub contents API is read with GITHUB_TOKEN / GH_TOKEN from the env (protoContent

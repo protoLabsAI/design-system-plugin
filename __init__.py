@@ -16,6 +16,10 @@ Tools:
   ds_rules       — the visual-identity rules (when to use what, what we don't do)
   ds_check       — lint a snippet with the audit engine (colors, fallbacks, tokens, scales…)
   ds_audit_repo  — audit a LOCAL checkout for design-system adherence → lane-split report
+  ds_site_probe_script — the in-page probe the agent runs with browser_eval on a live site
+  ds_audit_url   — audit a RENDERED site (probe JSON) or, statically, a URL → same report shape
+  ds_component_gaps — break a probed site into repeated UI patterns → covered / variant gap /
+                   missing components, with proposed APIs and ready-to-file gap issues
   ds_drift       — what changed since the last check (tokens + components); updates a snapshot
   theme_extract / theme_probe_script / theme_generate — brand → full dark+light theme on the live contract
 
@@ -785,6 +789,309 @@ def ds_audit_repo(path: str, include: str = "", exclude: str = "", rules: str = 
     return md + ("\n" + "\n".join(notes) if notes else "")
 
 
+# ── site audit: rendered probe (browser_eval) or static fetch ────────────────────
+# Pure analysis lives in siteprobe.py (+ the probe JS in siteprobe_js.py); the guarded fetch
+# in fetch.py. Browser rendering is NOT done here: plugins never import each other, so the
+# agent composes core's browser tools (browser_open + browser_eval) with these.
+
+_URL_MAX_HTML = 2_000_000
+_URL_MAX_CSS = 1_500_000
+_URL_MAX_TOTAL = 5_000_000
+_URL_MAX_SHEETS = 10
+_URL_BUDGET_S = 40.0
+
+
+def _siteprobe_mod():
+    return _sibling("siteprobe.py")
+
+
+def _fetch_mod():
+    return _sibling("fetch.py")
+
+
+def _url_fetch(url: str, max_bytes: int, deadline: float, allow_offsite_hosts=False) -> tuple[str, str]:
+    """The network seam for static URL mode (tests monkeypatch this). Public hosts only, the
+    connection pinned to the checked IP; ``deadline`` is an ABSOLUTE ``time.monotonic()`` value
+    shared by every fetch of one read — see fetch.py. Raises RuntimeError (FetchError)."""
+    return _fetch_mod().fetch_text(url, max_bytes=max_bytes, deadline=deadline, allow_offsite_hosts=allow_offsite_hosts)
+
+
+def _fetch_site(url: str) -> tuple[str, str, list[tuple[str, str]], list[str]]:
+    """Static read: (final_url, html, [(sheet_url, css)], notes). The HTML plus the stylesheets
+    it links (and their @imports) — same-site / common-CDN sheets first, then any other PUBLIC
+    host the page itself links (a site's CSS often lives on its own CDN domain); each fetch goes
+    through the guarded fetcher, and the whole read is capped in sheets, bytes and time."""
+    import time
+
+    sp = _siteprobe_mod()
+    deadline = time.monotonic() + _URL_BUDGET_S
+    # The page itself may only redirect within its own site; the stylesheets it links may live
+    # on any PUBLIC host (a site's CSS often sits on its own CDN domain).
+    final, html = _url_fetch(url, _URL_MAX_HTML, min(deadline, time.monotonic() + 15.0), allow_offsite_hosts=False)
+    assets = sp.site_assets(html, final)
+    total = len(html)
+    sheets: list[tuple[str, str]] = []
+    skipped, failed = [], []
+    linked = list(assets["stylesheets"])
+    queue = [u for u in linked if sp.stylesheet_allowed(u, final)] + [u for u in linked if not sp.stylesheet_allowed(u, final)]
+    seen: set[str] = set()
+    while queue:
+        sheet = queue.pop(0)
+        if sheet in seen:
+            continue
+        seen.add(sheet)
+        if len(sheets) >= _URL_MAX_SHEETS or deadline - time.monotonic() <= 1 or total > _URL_MAX_TOTAL:
+            skipped.append(sheet)
+            continue
+        try:
+            got_url, css = _url_fetch(sheet, _URL_MAX_CSS, min(deadline, time.monotonic() + 15.0), allow_offsite_hosts=True)
+        except Exception as e:  # noqa: BLE001 — one hostile stylesheet must not kill the read
+            failed.append(f"{sheet} ({e})")
+            continue
+        total += len(css)
+        sheets.append((got_url, css))
+        queue.extend(u for u in sp.css_imports(css, got_url) if u not in seen)
+    notes = [f"static read of {final}: HTML + {len(sheets)} stylesheet(s); {len(skipped)} skipped (over the sheet/byte/time budget), {len(failed)} failed"]
+    notes += [f"failed: {f}" for f in failed[:5]]
+    return final, html, sheets, notes
+
+
+def _report_paths(kind: str, label: str) -> tuple[Path, Path]:
+    import time
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", label)[:60] or kind
+    out_dir = _data_dir() / kind
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir / f"{name}-{stamp}.md", out_dir / f"{name}-{stamp}.json"
+
+
+def _url_label(url: str) -> str:
+    from urllib.parse import urlparse
+
+    u = urlparse(url or "")
+    return (u.hostname or "site") + (u.path.rstrip("/").replace("/", "_") if u.path and u.path != "/" else "")
+
+
+def _load_probe(text: str):
+    """(merged probe, None) or (None, error string)."""
+    sp = _siteprobe_mod()
+    try:
+        return sp.merge_probes(sp.parse_probe(text)), None
+    except (ValueError, RecursionError) as e:
+        return None, str(e)[:500]
+
+
+@tool
+def ds_site_probe_script(script_only: bool = False) -> str:
+    """The in-page PROBE for auditing / decomposing a live site — the first step of
+    ds_audit_url (rendered mode) and ds_component_gaps. Returns one JavaScript expression plus
+    how to run it; with `script_only=True`, just the expression (for an execute_code script).
+
+    Run it with the browser tools: `browser_open(url)` → (let the page settle; for a SPA take a
+    `browser_snapshot` first) → `browser_eval(<the expression>)`. It returns a JSON string
+    (≤ 30 KB, hard-capped; the script itself is ~24 KB) describing the RENDERED page: computed colors / type / radii /
+    spacing / shadows with counts and example selectors, text-vs-background pairs, :root
+    custom properties, DS class usage, landmarks, forms, and the page's REPEATED UI PATTERNS
+    (clustered, each with a count, inferred kind, trimmed markup, sizes, states, a11y name).
+    Pass that JSON — exactly as browser_eval returned it — to `ds_audit_url` and
+    `ds_component_gaps`. Several pages: pass a JSON array of the results to either tool."""
+    sp = _siteprobe_mod()
+    try:
+        prefix = (_vocab().prefix or "--pl-").strip("-")
+    except RuntimeError:
+        prefix = "pl"
+    js = sp.probe_script(prefix)
+    if script_only:
+        return js
+    return (
+        "Site probe — run on a page opened with browser_open:\n"
+        "1. browser_open(url); wait for it to settle (a SPA: browser_snapshot once, or re-run if `visible` comes back tiny).\n"
+        "2. browser_eval(expression=<the script below>) → a JSON string.\n"
+        "3. ds_audit_url(url_or_probe=<that string>) — adherence to the DS; ds_component_gaps(probe=<that string>) — what components the site needs.\n"
+        "4. Optional: browser_screenshot() and LOOK at it — the pattern kinds are heuristics; confirm the top ones by eye.\n"
+        "Several pages: collect each result and pass a JSON array of them ([\"<probe1>\", \"<probe2>\"]) to merge.\n"
+        "With execute_code (if enabled and allowed to call these tools) do it in one script so the JSON never passes through you:\n"
+        "  js = tools.ds_site_probe_script(script_only=True)\n"
+        "  probes = []\n"
+        "  for u in urls: tools.browser_open(url=u); probes.append(tools.browser_eval(expression=js))\n"
+        "  import json; p = json.dumps(probes); print(tools.ds_audit_url(url_or_probe=p)[:2500]); print(tools.ds_component_gaps(probe=p)[:3000])\n\n"
+        + js
+    )
+
+
+_MAX_REPLY = 24_000
+
+
+def _cap_reply(text: str) -> str:
+    """Keep a tool reply inside a sane context budget; the report files hold everything."""
+    if len(text) <= _MAX_REPLY:
+        return text
+    cut = text.rfind("Full report:")
+    tail = text[cut:] if cut > 0 and len(text) - cut < 2000 else ""
+    return text[: _MAX_REPLY - len(tail)] + "\n\n_…reply truncated — the report files hold everything._\n" + tail
+
+
+def _rules_arg(rules: str, valid: dict) -> tuple[list[str], str | None]:
+    wanted = [r.strip() for r in (rules or "").split(",") if r.strip()]
+    unknown = [r for r in wanted if r not in valid]
+    if unknown:
+        return [], f"unknown rule id(s) {', '.join(unknown)}. Valid: {', '.join(valid)}"
+    return wanted, None
+
+
+@tool
+def ds_audit_url(url_or_probe: str, rules: str = "") -> str:
+    """Audit a live SITE for design-system adherence → the same 0-100 score, lanes and report
+    shape as ds_audit_repo.
+
+    `url_or_probe` is EITHER:
+    - the probe JSON from `browser_eval(ds_site_probe_script)` (or a JSON array of several
+      pages' probes) — the RENDERED truth, and the preferred input: every computed color is
+      matched to the nearest DS token (ΔE2000), font sizes / radii / spacing / shadows are
+      checked against the token scales, the page's --pl-* adoption and token values are
+      checked, text/background pairs are WCAG contrast-checked, and interactive patterns with
+      no accessible name are flagged;
+    - a URL — a STATIC fallback when the browser tools are off: the HTML and its same-site /
+      CDN stylesheets are fetched (public hosts only) and run through the repo auditor's CSS
+      rules. No JavaScript runs, so CSS-in-JS and runtime theming are invisible; the report
+      says so. Prefer the probe.
+
+    `rules`: comma-separated rule ids to run (default all). Writes the full .md + .json report
+    to the plugin data dir and returns the summary plus their paths. Findings are heuristics
+    over a rendered page — check the top ones (screenshot / the cited selector) before filing."""
+    try:
+        return _cap_reply(_ds_audit_url(url_or_probe, rules))
+    except Exception as e:  # one hostile page/stylesheet must not kill the tool call
+        log.exception("[design-system] ds_audit_url failed")
+        return f"ds_audit_url error: {type(e).__name__}: {str(e)[:300]}"
+
+
+def _ds_audit_url(url_or_probe: str, rules: str = "") -> str:
+    raw = (url_or_probe or "").strip()
+    if not raw:
+        return "ds_audit_url: pass the probe JSON (preferred — see ds_site_probe_script) or a URL."
+    sp = _siteprobe_mod()
+    au = _audit_mod()
+    try:
+        vocab = _vocab()
+    except RuntimeError as e:
+        return f"ds_audit_url error (couldn't load the design system's tokens): {e}"
+    if sp.looks_like_probe(raw):
+        wanted, err = _rules_arg(rules, sp.URL_RULES)
+        if err:
+            return f"ds_audit_url: {err}"
+        probe, err = _load_probe(raw)
+        if err:
+            return f"ds_audit_url: {err}"
+        findings, stats = sp.audit_probe(probe, vocab, rules=wanted or None)
+        summary = sp.summarize_url(findings, stats)
+        stats_line = sp.stats_line_rendered(summary, probe)
+        pages = summary["pages"]
+        title = f"Design-system audit (rendered) — {pages[0]}" + (f" +{len(pages) - 1} pages" if len(pages) > 1 else "")
+        label = _url_label(pages[0] if pages else "")
+        if probe.get("truncated"):
+            summary["probe_truncated"] = probe["truncated"]
+    else:
+        wanted, err = _rules_arg(rules, sp.REPORT_RULES)
+        if err:
+            return f"ds_audit_url: {err}"
+        rendered_only = [r for r in wanted if r in sp.RENDERED_ONLY]
+        if rendered_only:
+            return (f"ds_audit_url: {', '.join(rendered_only)} only apply to a RENDERED probe — a static URL read has no computed "
+                    "styles, contrast pairs or accessible names. Run ds_site_probe_script with browser_eval and pass the probe, or drop those rules.")
+        url = raw if re.match(r"^https?://", raw, re.IGNORECASE) else "https://" + raw
+        try:
+            final, html, sheets, notes = _fetch_site(url)
+        except RuntimeError as e:
+            return (f"ds_audit_url: could not read {url} statically ({e}). If the browser tools are on, run the probe "
+                    "instead (ds_site_probe_script → browser_eval) — it also works for pages a static fetch can't reach.")
+        try:
+            inventory = _inventory()
+        except Exception:  # noqa: BLE001 — the inventory only sharpens two rules
+            inventory = []
+        findings, summary = sp.static_audit(html, final, sheets, vocab, inventory=inventory, rules=wanted or None, notes=notes)
+        stats_line = sp.stats_line_static(summary)
+        title = f"Design-system audit (STATIC, no JS) — {final}"
+        label = _url_label(final) + "-static"
+    report_md = report_json = None
+    try:
+        report_md, report_json = _report_paths("audits", label)
+        report_md.write_text(au.render_markdown(findings, summary, title=title, per_group=25, groups_per_rule=100, vocab=vocab,
+                                                registry=sp.REPORT_RULES, stats_line=stats_line), encoding="utf-8")
+        report_json.write_text(au.render_json(findings, summary, root=title, vocab=vocab, registry=sp.REPORT_RULES), encoding="utf-8")
+    except OSError as e:
+        log.warning("[design-system] could not write URL audit report: %s", e)
+    md = au.render_markdown(findings, summary, title=title, per_group=3, groups_per_rule=8, vocab=vocab, registry=sp.REPORT_RULES, stats_line=stats_line)
+    notes = list(summary.get("notes") or [])
+    if summary.get("probe_truncated"):
+        notes.append(f"_The probe trimmed itself to fit its size cap ({', '.join(summary['probe_truncated'][:3])}…): the rarest values/patterns are not in it._")
+    if report_md:
+        notes.append(f"Full report: `{report_md}` (markdown) · `{report_json}` (JSON, every finding).")
+    return md + ("\n" + "\n".join(notes) if notes else "")
+
+
+@tool
+def ds_component_gaps(probe: str) -> str:
+    """Break a probed site down into its REPEATED UI PATTERNS and match each against the
+    design system's component inventory — where the DS already covers the site, where a DS
+    component lacks a variant the site needs, and where a NEW component is warranted.
+
+    `probe`: the JSON `browser_eval` returned for `ds_site_probe_script` (or a JSON array of
+    several pages' probes — patterns are merged across pages by structure).
+
+    Each pattern group is classified:
+    - COVERED — the DS ships it (e.g. Button, Tabs, Dialog); the site should compose it;
+    - VARIANT GAP — the DS component exists but its published stories don't show a size /
+      shape / variant / state the site uses (says which);
+    - MISSING — no DS component for this kind (breadcrumb, pagination, carousel…): a candidate
+      new component with its count, representative markup, a proposed name + props API
+      inferred from the variation seen, and a priority (frequency × prominence);
+    - UNCLASSIFIED — a repeated boxed pattern the heuristics can't name: LOOK at it.
+    Returns markdown with a ready-to-file issue per MISSING / VARIANT GAP in the DS gap format
+    (## Gap / ## Evidence / ## Proposed API / ## Priority / ## Context), and writes .md + .json
+    to the plugin data dir. Kinds are heuristics — screenshot and verify before filing."""
+    try:
+        return _cap_reply(_ds_component_gaps(probe))
+    except Exception as e:  # one hostile page/stylesheet must not kill the tool call
+        log.exception("[design-system] ds_component_gaps failed")
+        return f"ds_component_gaps error: {type(e).__name__}: {str(e)[:300]}"
+
+
+def _ds_component_gaps(probe: str) -> str:
+    raw = (probe or "").strip()
+    if not raw:
+        return "ds_component_gaps: pass the probe JSON (run ds_site_probe_script's script with browser_eval first)."
+    sp = _siteprobe_mod()
+    merged, err = _load_probe(raw)
+    if err:
+        return f"ds_component_gaps: {err}"
+    inventory = _inventory()
+    try:
+        sb = _sb_components()
+    except RuntimeError:
+        sb = None
+    try:
+        vocab = _vocab()
+    except RuntimeError:
+        vocab = None
+    result = sp.component_gaps(merged, inventory, sb, vocab)
+    notes = []
+    if not inventory:
+        notes.append("_Component inventory unavailable (couldn't read the DS repo) — every pattern reads as MISSING; fix access before trusting this._")
+    if sb is None:
+        notes.append("_Storybook unavailable — variant gaps can't be checked; covered components are marked unverified._")
+    report_md = None
+    try:
+        report_md, report_json = _report_paths("gaps", _url_label(result["url"]))
+        report_md.write_text(sp.render_gaps_markdown(result, ds_repo=_cfg("repo"), report_path=str(report_md)), encoding="utf-8")
+        report_json.write_text(json.dumps(result, indent=1, default=str), encoding="utf-8")
+        notes.append(f"Full report: `{report_md}` · `{report_json}`.")
+    except OSError as e:
+        log.warning("[design-system] could not write gap report: %s", e)
+    return sp.render_gaps_markdown(result, ds_repo=_cfg("repo"), report_path=str(report_md or "")) + ("\n" + "\n".join(notes) if notes else "")
+
+
 # ── drift snapshot + watch ─────────────────────────────────────────────────────
 
 
@@ -1136,14 +1443,11 @@ _TG_MAX_SHEETS = 10
 _TG_BUDGET_S = 30.0  # wall clock for the WHOLE extract (page + every stylesheet + redirects)
 
 
-def _fetch_mod():
-    return _sibling("fetch.py")
-
-
 def _tg_fetch(url: str, max_bytes: int, deadline: float) -> tuple[str, str]:
     """GET ``url`` → (final_url, text) through the hardened fetcher (public hosts only, the
     connection pinned to the vetted IP, redirects re-vetted, ``deadline`` a shared wall-clock
-    budget, decompression capped). Raises RuntimeError. The test seam for the URL path."""
+    budget — an ABSOLUTE time.monotonic() value — decompression capped). Raises FetchError (a
+    RuntimeError). The test seam for the URL path."""
     return _fetch_mod().fetch_text(url, max_bytes=max_bytes, deadline=deadline, allow_offsite_hosts=True)
 
 
@@ -1176,7 +1480,7 @@ def _tg_extract_url(url: str) -> dict:
             continue
         try:
             _, css = _tg_fetch(sheet, _TG_MAX_CSS, deadline)
-        except RuntimeError as e:
+        except Exception as e:  # noqa: BLE001 — one hostile stylesheet must not kill the extract
             failed.append(f"{sheet} ({e})")
             continue
         total += len(css)
@@ -1454,7 +1758,10 @@ def register(registry) -> None:
     registry.register_router(_build_view_router(), prefix="/plugins/design-system")
     # DATA: gated /api/plugins/design-system — fetched with the handshake token.
     registry.register_router(_build_data_router(), prefix="/api/plugins/design-system")
-    registry.register_tools([ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_search, ds_kit_classes, ds_rules, ds_check, ds_audit_repo, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply, theme_extract, theme_probe_script, theme_generate])
+    tools = [ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_search, ds_kit_classes, ds_rules, ds_check, ds_audit_repo,
+             ds_site_probe_script, ds_audit_url, ds_component_gaps, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply,
+             theme_extract, theme_probe_script, theme_generate]
+    registry.register_tools(tools)
 
     # design-critic subagent (ADR 0018) — reviews a prototype/component against the LIVE DS + a11y,
     # grounded via the ds_* tools above. The lead delegates to it with `task("design-critic", …)`.
@@ -1477,4 +1784,4 @@ def register(registry) -> None:
         except Exception:  # noqa: BLE001 — a scheduler hiccup must never break plugin load
             log.exception("[design-system] failed to arm the drift watch")
 
-    log.info("[design-system] registered 18 tools + design-critic/ds-explainer/ds-designer subagents (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
+    log.info("[design-system] registered %d tools + design-critic/ds-explainer/ds-designer subagents (repo=%s@%s, drift-watch=%s)", len(tools), _cfg("repo"), _cfg("ref"), cron or "off")

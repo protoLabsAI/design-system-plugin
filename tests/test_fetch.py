@@ -181,3 +181,175 @@ def test_non_http_schemes_are_refused():
     for url in ("file:///etc/passwd", "ftp://example.com/", "gopher://x/"):
         with pytest.raises(fx.FetchError, match="http"):
             fx.fetch_text(url, max_bytes=100, deadline=_dl())
+
+
+# ── merged-canonical regressions (review of #19: deadline phases, decoders, hostile input) ────
+
+
+def _raw_server(handler):
+    """A bare TCP server: ``handler(conn)`` writes whatever bytes it likes after the request."""
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0))
+    s.listen(8)
+
+    def serve():
+        while True:
+            try:
+                c, _ = s.accept()
+            except OSError:
+                return
+
+            def one(c=c):
+                try:
+                    c.recv(65536)
+                    handler(c)
+                except OSError:
+                    pass
+                finally:
+                    try:
+                        c.close()
+                    except OSError:
+                        pass
+
+            threading.Thread(target=one, daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return s, s.getsockname()[1]
+
+
+@pytest.fixture
+def raw(loopback_is_public):
+    socks = []
+
+    def make(handler):
+        s, port = _raw_server(handler)
+        socks.append(s)
+        return f"http://127.0.0.1:{port}/"
+
+    yield make
+    for s in socks:
+        s.close()
+
+
+def _drip(prefix: bytes, byte: bytes, n: int = 40, gap: float = 0.2, suffix: bytes = b""):
+    def h(c):
+        c.sendall(prefix)
+        for _ in range(n):
+            c.sendall(byte)
+            time.sleep(gap)
+        c.sendall(suffix)
+    return h
+
+
+@pytest.mark.parametrize("name, handler", [
+    ("status line", lambda c: [c.sendall(bytes([b])) or time.sleep(0.2) for b in b"HTTP/1.1 200 OK\r\n" * 3]),
+    ("headers", _drip(b"HTTP/1.1 200 OK\r\nX-Slow: ", b"a", suffix=b"\r\nContent-Length: 2\r\n\r\nok")),
+    ("chunk size", _drip(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n1", b"0")),
+    ("body", _drip(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n", b"x")),
+])
+def test_the_deadline_holds_in_every_phase_of_the_response(raw, name, handler):
+    """A 1-byte drip every 0.2 s used to survive 5 s+ against a 1 s deadline outside the body
+    loop (status line, headers, chunk sizes): per-read timeouts never fire on a drip."""
+    url = raw(handler)
+    t0 = time.monotonic()
+    with pytest.raises(fx.FetchError, match="deadline"):
+        fx.fetch_text(url, max_bytes=1_000_000, deadline=_dl(1.0))
+    assert time.monotonic() - t0 < 2.5, name
+
+
+def test_the_deadline_holds_during_a_stalled_tls_handshake(monkeypatch, raw):
+    """The server accepts and then says nothing: the TLS handshake blocks until the watchdog."""
+    url = raw(lambda c: time.sleep(6)).replace("http://", "https://")
+    t0 = time.monotonic()
+    with pytest.raises(fx.FetchError, match="deadline"):
+        fx.fetch_text(url, max_bytes=1000, deadline=_dl(1.0))
+    assert time.monotonic() - t0 < 2.5
+
+
+def _respond(headers: bytes, body: bytes):
+    return lambda c: c.sendall(b"HTTP/1.1 " + headers + b"Content-Length: %d\r\n\r\n" % len(body) + body)
+
+
+def test_corrupt_gzip_is_a_fetch_error(raw):
+    url = raw(_respond(b"200 OK\r\nContent-Encoding: gzip\r\n", b"NOT GZIP AT ALL!!!!!"))
+    with pytest.raises(fx.FetchError):
+        fx.fetch_text(url, max_bytes=1000, deadline=_dl())
+
+
+def test_raw_and_zlib_deflate_both_decode(raw):
+    import zlib
+
+    co = zlib.compressobj(6, zlib.DEFLATED, -15)
+    raw_deflate = co.compress(b"<html>raw</html>") + co.flush()
+    assert fx.fetch_text(raw(_respond(b"200 OK\r\nContent-Encoding: deflate\r\n", raw_deflate)), max_bytes=1000, deadline=_dl())[1] == "<html>raw</html>"
+    wrapped = zlib.compress(b"<html>zlib</html>")
+    assert fx.fetch_text(raw(_respond(b"200 OK\r\nContent-Encoding: deflate\r\n", wrapped)), max_bytes=1000, deadline=_dl())[1] == "<html>zlib</html>"
+
+
+def test_multi_member_gzip_decodes_every_member(raw):
+    body = gzip.compress(b"part1-") + gzip.compress(b"part2")
+    assert fx.fetch_text(raw(_respond(b"200 OK\r\nContent-Encoding: gzip\r\n", body)), max_bytes=1000, deadline=_dl())[1] == "part1-part2"
+
+
+def test_a_redirect_without_location_is_an_error(raw):
+    with pytest.raises(fx.FetchError, match="no Location"):
+        fx.fetch_text(raw(_respond(b"302 Found\r\n", b"redirect?")), max_bytes=1000, deadline=_dl())
+
+
+def test_https_to_http_downgrade_is_refused(monkeypatch):
+    class R:
+        status = 301
+
+        def getheader(self, k, d=None):
+            return "http://example.com/" if k == "Location" else d
+
+    monkeypatch.setattr(fx, "resolve_public", lambda h, p: "93.184.216.34")
+    monkeypatch.setattr(fx._PinnedHTTPS, "request", lambda self, *a, **k: None)
+    monkeypatch.setattr(fx._PinnedHTTPS, "getresponse", lambda self: R())
+    with pytest.raises(fx.FetchError, match="downgrade"):
+        fx.fetch_text("https://example.com/", max_bytes=100, deadline=_dl())
+
+
+@pytest.mark.parametrize("url", ["https://" + "a" * 70 + ".com/", "https://a..com/", "http://[::1/", "http://x.com:99999/", "http://u:p@x.com/"])
+def test_hostile_urls_raise_only_fetch_error(url):
+    with pytest.raises(fx.FetchError):
+        fx.fetch_text(url, max_bytes=100, deadline=_dl())
+
+
+@pytest.mark.parametrize("addr, public", [
+    ("64:ff9b::7f00:1", False), ("64:ff9b::a00:1", False), ("64:ff9b::6477:ef08", False),  # NAT64 of 127/8, 10/8, tailnet
+    ("64:ff9b::808:808", True),                                                              # NAT64 of 8.8.8.8
+    ("::7f00:1", False), ("::a00:1", False),                                                 # IPv4-compatible
+    ("2002:6477:ef08::1", False), ("fe80::1%lo0", False), ("224.0.0.1", False),
+])
+def test_more_v4_in_v6_forms(addr, public):
+    assert fx.is_public_ip(addr) is public
+
+
+def test_ip_literals_are_their_own_site():
+    assert not fx.same_site("http://127.0.0.1/", "http://10.0.0.1/")
+    assert not fx.same_site("1.2.3.4", "9.9.3.4")
+    assert fx.site_of("[::1]") == "::1" and fx.site_of("www.acme.co.uk") == "acme.co.uk"
+    assert fx.same_site("https://WWW.Acme.com/x", "cdn.acme.com")
+
+
+def test_offsite_allow_collection_is_case_insensitive():
+    assert fx._offsite_ok(["CDN.Example.com"], "cdn.example.com")
+    assert fx._offsite_ok(lambda h: h.endswith(".net"), "a.net") and not fx._offsite_ok(lambda h: 1 / 0, "a.net")
+
+
+def test_ipv6_literal_host_header_is_bracketed(monkeypatch):
+    sent = {}
+
+    def fake_request(self, method, path, headers=None):
+        self.putrequest(method, path)  # http.client derives Host from (host, port)
+        sent["host"] = next(h for h in self._buffer if h.startswith(b"Host:"))
+        self._buffer.clear()
+
+    monkeypatch.setattr(fx, "resolve_public", lambda h, p: "2606:4700::1111")
+    monkeypatch.setattr(fx._PinnedHTTP, "request", fake_request)
+    monkeypatch.setattr(fx._PinnedHTTP, "getresponse", lambda self: (_ for _ in ()).throw(fx.FetchError("stop")))
+    with pytest.raises(fx.FetchError, match="stop"):
+        fx.fetch_text("http://[2606:4700::1111]:8080/", max_bytes=100, deadline=_dl())
+    assert sent["host"] == b"Host: [2606:4700::1111]:8080"

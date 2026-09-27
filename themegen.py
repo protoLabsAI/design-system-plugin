@@ -41,6 +41,7 @@ def _load(stem: str, filename: str):
 
 cc = _load("design_system_colorcore_tg", "colorcore.py")
 _theme = _load("design_system_theme_tg", "theme.py")
+_fetch = _load("design_system_fetch_tg", "fetch.py")  # only for site_of — the ONE site helper
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CSS color parsing — the contract ships hex, rgba() and oklch(); sites ship anything.
@@ -760,22 +761,13 @@ CDN_HOSTS = (
 CDN_SUFFIXES = (".cloudfront.net", ".azureedge.net", ".akamaized.net", ".fastly.net", ".website-files.com", ".wixstatic.com", ".b-cdn.net")
 
 
-def _site(host: str) -> str:
-    if re.fullmatch(r"[\d.]+|\[?[0-9a-fA-F:]+\]?", host or ""):
-        return (host or "").lower()  # an IP literal is its own site
-    parts = (host or "").lower().split(".")
-    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in ("co", "com", "org", "net", "ac", "gov"):
-        return ".".join(parts[-3:])
-    return ".".join(parts[-2:])
-
-
 def stylesheet_allowed(sheet_url: str, page_url: str) -> bool:
     """Same site as the page (``cdn.acme.com`` for ``www.acme.com``) or a common CDN host."""
     su, pu = urlparse(sheet_url), urlparse(page_url)
     if su.scheme not in ("http", "https") or not su.hostname:
         return False
     host = su.hostname.lower()
-    return _site(host) == _site(pu.hostname or "") or host in CDN_HOSTS or host.endswith(CDN_SUFFIXES)
+    return _fetch.site_of(host) == _fetch.site_of(pu.hostname or "") or host in CDN_HOSTS or host.endswith(CDN_SUFFIXES)
 
 
 _HEX_LIST_RE = re.compile(r"^\s*#?[0-9a-fA-F]{3,8}(\s*[,\s]\s*#?[0-9a-fA-F]{3,8})*\s*$")
