@@ -14,7 +14,8 @@ Tools:
   ds_stories     — the published Storybook inventory: every component and every variant
   ds_story       — one component's variants + a LIVE render URL per variant
   ds_rules       — the visual-identity rules (when to use what, what we don't do)
-  ds_check       — lint code: flag hardcoded hex a token already defines
+  ds_check       — lint a snippet with the audit engine (colors, fallbacks, tokens, scales…)
+  ds_audit_repo  — audit a LOCAL checkout for design-system adherence → lane-split report
   ds_drift       — what changed since the last check (tokens + components); updates a snapshot
 
 A recurring DRIFT WATCH (native scheduler) fires a turn on a cadence that calls ds_drift and,
@@ -405,41 +406,369 @@ def _hex_token_map(tokens: object, path: list[str] | None = None, out: dict[str,
     return out
 
 
+# ── audit engine: vocabulary + inventory (cached), ds_check, ds_audit_repo ──────
+# The rules live in audit.py and the token vocabulary in vocab.py — pure modules, so a URL
+# auditor can feed them fetched CSS and computed styles. This half is only the fetch + the
+# tool surface.
+
+_VOCAB_CACHE: tuple[float, tuple, object] | None = None   # (fetched_at, key, Vocab)
+_INV_CACHE: tuple[float, tuple, list[str]] | None = None  # (fetched_at, key, names)
+_AUDIT_ROOTS: list[str] = []  # plugin setting `audit_roots` — extra dirs ds_audit_repo may read
+
+
+def _vocab_mod():
+    return _sibling("vocab.py")
+
+
+def _audit_mod():
+    return _sibling("audit.py")
+
+
+def _vocab(force: bool = False):
+    """The DS token vocabulary, TTL-cached like the kit classes. ``tokens.css`` is the
+    contract; ``tokens_path`` (JSON) is only read when the CSS declares nothing. The kit
+    stylesheet's own ``--pl-*`` custom properties ride along as KNOWN names (component
+    vars are legitimate to reference, just not tokens). Raises ``RuntimeError``."""
+    global _VOCAB_CACHE
+    import time
+
+    # The fetch seam is part of the key so a swapped `_gh_get_raw` (tests, a repointed repo)
+    # never serves another source's vocabulary.
+    key = (_cfg("repo"), _cfg("ref"), _cfg("tokens_css_path"), _cfg("tokens_path"), id(_gh_get_raw))
+    if not force and _VOCAB_CACHE and _VOCAB_CACHE[1] == key and (time.time() - _VOCAB_CACHE[0]) < _FETCH_TTL:
+        return _VOCAB_CACHE[2]
+    vm = _vocab_mod()
+    errors = []
+    css = ""
+    try:
+        css = _gh_get_raw(_cfg("tokens_css_path"))
+    except RuntimeError as e:
+        errors.append(str(e))
+    tokens_json = None
+    if not vm.build_vocab(css).names:
+        # No custom properties parsed out of the CSS (missing, empty, or a shape we can't
+        # read) — the JSON token source is the fallback, never an empty vocabulary.
+        try:
+            tokens_json = _gh_get_raw(_cfg("tokens_path"))
+        except RuntimeError as e:
+            errors.append(str(e))
+    extra: set[str] = set()
+    if _cfg("kit_css_path"):
+        try:
+            extra = vm.kit_custom_properties(_gh_get_raw(_cfg("kit_css_path")))
+        except RuntimeError:
+            extra = set()  # the kit is optional; its absence only means fewer known component vars
+    v = vm.build_vocab(css, tokens_json, extra)
+    if v.source == "empty":
+        raise RuntimeError("no design tokens found (" + ("; ".join(errors) or f"{_cfg('tokens_css_path')} declares no custom properties") + ")")
+    _VOCAB_CACHE = (time.time(), key, v)
+    return v
+
+
+def _inventory(force: bool = False) -> list[str]:
+    """The DS component names, for the control/shadow-component rules. Read from the
+    component SOURCE modules' exports (``export function Button``) — Storybook titles are
+    often groups ("Forms", "Overlays") and would miss Input/Textarea/Dialog entirely. Falls
+    back to story-file names, then to Storybook titles. Never raises: an empty inventory
+    makes the engine use its default control map and skip shadow-component."""
+    global _INV_CACHE
+    import time
+
+    key = (_cfg("repo"), _cfg("ref"), _cfg("components_path"), id(_gh_list), id(_gh_get_raw))
+    if not force and _INV_CACHE and _INV_CACHE[1] == key and (time.time() - _INV_CACHE[0]) < _FETCH_TTL:
+        return _INV_CACHE[2]
+    au = _audit_mod()
+    names: set[str] = set()
+    try:
+        entries = _gh_list(_cfg("components_path"))
+        names |= set(_component_names(entries))
+        sources = [
+            e["name"] for e in entries
+            if re.search(r"\.(tsx|jsx|ts|js)$", str(e.get("name", "")))
+            and not re.search(r"\.(stories|test|spec)\.", str(e.get("name", "")))
+        ][:40]
+        for fn in sources:
+            try:
+                names |= set(au.exported_components(_gh_get_raw(f"{_cfg('components_path')}/{fn}")))
+            except RuntimeError:
+                continue
+    except RuntimeError:
+        pass
+    if not names:
+        try:
+            names = {c["title"].split("/")[-1].replace(" ", "") for c in _sb_components()}
+        except RuntimeError:
+            names = set()
+    out = sorted(names)
+    _INV_CACHE = (time.time(), key, out)
+    return out
+
+
+def _guess_filename(code: str) -> str:
+    """Pick a language for an unnamed snippet. CSS is the fallback only when the code looks
+    like CSS; a bare literal or a Tailwind class string is treated as markup/JS, where any
+    quoted or arbitrary-value hex is judged (not only ones inside declarations)."""
+    if re.search(
+        r"className=|=>|\bimport\s|<[A-Z][A-Za-z]*[\s/>]|\breturn\s*[(<]|\bexport\s+(default\s+)?(function|const)\b"
+        r"|style=\{\{|\b(const|let|var)\s+\w+\s*=|\[#[0-9a-fA-F]{3,8}\]",
+        code,
+    ):
+        return "snippet.tsx"
+    if re.search(r"<(div|span|section|html|body|button|style|svg|path|circle|rect|a|p|input)\b", code, re.IGNORECASE):
+        return "snippet.html"
+    return "snippet.css"
+
+
+def _format_findings(findings: list[dict], limit: int = 60) -> list[str]:
+    lines = []
+    for f in findings[:limit]:
+        where = f"L{f['line']}:{f['col']} " if f.get("line") else ""
+        tail = f" → {f['suggestion']}" if f.get("suggestion") else ""
+        lines.append(f"- {where}[{f['rule']}·{f['severity']}] {f['message']}{tail}")
+    if len(findings) > limit:
+        lines.append(f"- … +{len(findings) - limit} more")
+    return lines
+
+
 @tool
-def ds_check(code: str) -> str:
-    """Lint a CSS / JSX / Tailwind snippet against the token vocabulary: flag hardcoded HEX
-    colors — a value a design token already defines should be `var(--pl-…)` or the Tailwind
-    utility, not a literal. The agent's 'never hardcode a color a token defines' rule, as a check."""
+def ds_check(code: str, filename: str = "") -> str:
+    """Lint a CSS / SCSS / JSX / TSX / HTML / Tailwind snippet against the LIVE design system —
+    the same rule engine ds_audit_repo runs over a whole repo. Flags: literal colors anywhere,
+    including Tailwind arbitrary values like `bg-[#9b87f2]` (with the exact or nearest
+    `var(--pl-…)` token / Tailwind utility to use and its ΔE), `var(--pl-x, fallback)` whose
+    fallback no longer matches the token, `var(--pl-…)` names the DS doesn't define, hardcoded font-size/radius/
+    spacing/shadow values where a token scale exists, app CSS restyling `.pl-*` classes, local
+    aliases of token values, raw <button>/<input>/… where the DS ships a component, and imports
+    of competing UI kits. `filename` (e.g. "Card.tsx", "card.css") picks the language; omitted,
+    it is guessed from the code. Run it over anything you write before showing it.
+    Suppress a deliberate line with a `ds-audit-ignore` comment."""
     if not (code or "").strip():
         return "ds_check: pass the code/CSS to check."
     try:
-        tokens = json.loads(_gh_get_raw(_cfg("tokens_path")))
-    except (RuntimeError, json.JSONDecodeError) as e:
+        vocab = _vocab()
+    except RuntimeError as e:
         return f"ds_check error (couldn't load tokens): {e}"
-    hexmap = _hex_token_map(tokens)
-    findings = []
-    for h in dict.fromkeys(m.lower() for m in _HEX_RE.findall(code)):  # de-duped, order-stable
-        if h in hexmap:
-            findings.append(f"- `{h}` → design token **{hexmap[h]}**; use var(--pl-…) or the Tailwind utility, not the literal.")
-        else:
-            findings.append(f"- `{h}` → not a design token; if it's a real brand value add it to @protolabsai/design, otherwise avoid the one-off.")
+    au = _audit_mod()
+    fname = (filename or "").strip() or _guess_filename(code)
+    inventory: list[str] = []
+    if au.file_kind(fname) in ("js", "sfc"):
+        try:
+            inventory = _inventory()
+        except Exception:  # noqa: BLE001 — the inventory only sharpens two rules
+            inventory = []
+    ctx = au.AuditContext(inventory=inventory)
+    # Unnamed snippets are fragments of unknown shape: `loose` judges every hex when there
+    # are no CSS declarations to anchor on ("#ff0000", "bg-[#9b87f2] text-white").
+    findings = au.audit_text(code, fname, vocab, ctx=ctx, loose=not (filename or "").strip())
+    findings, _summary = au.finalize(findings, ctx, vocab)
     if not findings:
-        return "ds_check: no hardcoded hex colors — clean. ✓"
-    return f"ds_check found {len(findings)} hardcoded color(s):\n" + "\n".join(findings)
+        return "ds_check: no hardcoded colors, stale fallbacks, unknown tokens or off-system patterns — clean. ✓"
+    consumer = sorted((f for f in findings if f["lane"] == "consumer"), key=lambda f: (f["line"], f["col"]))
+    gaps = [f for f in findings if f["lane"] == "ds"]
+    out = [f"ds_check found {len(consumer)} issue(s) in {fname}:"] + _format_findings(consumer)
+    if gaps:
+        out += ["", "Design-system gaps (not this code's fault — the DS lacks something it needed):"] + _format_findings(gaps, 10)
+    return "\n".join(out)
 
 
-# ── drift snapshot + watch ─────────────────────────────────────────────────────
+def _host_config():
+    """The live host config (``graph.sdk.config()``), or None outside a host. A seam: tests
+    monkeypatch it rather than standing up a runtime."""
+    try:
+        from graph.sdk import config
+
+        return config()
+    except Exception:  # noqa: BLE001 — no host (tests, a bare import): no host-granted roots
+        return None
 
 
-def _snap_path() -> Path:
-    """Instance-scoped drift snapshot (ADR 0004). ``DESIGN_SYSTEM_DIR`` overrides the base;
+def _registered_projects() -> list[dict]:
+    cfg = _host_config()
+    out: list[dict] = []
+    if cfg is None:
+        return out
+    for key in ("projects", "filesystem_projects"):
+        for p in getattr(cfg, key, None) or []:
+            if isinstance(p, dict) and p.get("path"):
+                out.append({**p, "_source": "managed project" if key == "projects" else "work folder"})
+    return out
+
+
+def _allowed_roots() -> list[tuple[str, Path]]:
+    """Where ds_audit_repo may read: the host's project-onboarding root (where
+    ``onboard_project`` clones), every registered project / work folder (ADR 0095 / 0007 —
+    the operator already granted the agent those), and this plugin's ``audit_roots``."""
+    roots: list[tuple[str, Path]] = []
+    cfg = _host_config()
+    onboarding = str(getattr(cfg, "onboarding_root", "") or "").strip() if cfg is not None else ""
+    if onboarding:
+        roots.append(("onboarding root", Path(onboarding).expanduser()))
+    for p in _registered_projects():
+        roots.append((f"{p['_source']} {p.get('name') or p['path']}", Path(str(p["path"])).expanduser()))
+    for r in _AUDIT_ROOTS:
+        if str(r).strip():
+            roots.append(("audit_roots", Path(str(r).strip()).expanduser()))
+    out = []
+    for label, path in roots:
+        try:
+            out.append((label, path.resolve()))
+        except OSError:
+            continue
+    return out
+
+
+def _data_dir() -> Path:
+    """Instance-scoped plugin data dir (ADR 0004). ``DESIGN_SYSTEM_DIR`` overrides the base;
     ``PROTOAGENT_INSTANCE`` adds a per-member subdir so fleet members don't collide."""
     base = Path(os.environ.get("DESIGN_SYSTEM_DIR") or (Path.home() / ".protoagent" / "design-system"))
     inst = os.environ.get("PROTOAGENT_INSTANCE", "").strip()
     if inst:
         base = base / inst
     base.mkdir(parents=True, exist_ok=True)
-    return base / "snapshot.json"
+    return base
+
+
+REPORTS_KEPT = 10  # per audited target; older report pairs are deleted on each new audit
+
+
+def _prune_reports(out_dir: Path, name: str, keep: int = REPORTS_KEPT) -> None:
+    """Keep the newest ``keep`` report pairs for one target — reports are big and a scheduled
+    audit would otherwise grow the data dir forever. Stamps sort chronologically."""
+    for ext in (".md", ".json"):
+        pat = re.compile(re.escape(name) + r"-\d{8}-\d{6}" + re.escape(ext) + "$")
+        mine = sorted(p for p in out_dir.iterdir() if pat.match(p.name))
+        for old in mine[:-keep] if keep > 0 else mine:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+
+_SLUG_RE = re.compile(r"^(?:https?://github\.com/)?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$")
+
+
+@tool
+def ds_audit_repo(path: str, include: str = "", exclude: str = "", rules: str = "", max_findings: int = 400) -> str:
+    """Audit a LOCAL checkout for design-system adherence and write a full report.
+
+    `path`: a directory on this host — or a GitHub `owner/repo` that is already checked out
+    as a registered project. It must live under the project-onboarding root, a registered
+    project / work folder, or this plugin's `audit_roots` setting; anything else is refused
+    with the remedy. This tool never clones: for a repo that isn't on disk yet, run
+    `onboard_project("owner/repo")` first, then call this again.
+
+    `include` / `exclude`: comma-separated globs on the path relative to `path` (e.g.
+    include="apps/web/src/*"). Always skipped: dot-directories, node_modules, dist, build, out,
+    vendor(ed), third_party, coverage, framework caches (.next, .svelte-kit, …), test dirs
+    (tests, test, __tests__, e2e, fixtures, __mocks__, __snapshots__), storybook-static,
+    *.test.*, *.spec.*, *.stories.*, *.d.ts, *.min.*, the token file itself, symlinks and
+    special files. `public/` IS scanned. The audit stops after 60 s and says so. `rules`: comma-separated rule
+    ids to run (default all): raw-color, stale-fallback, unknown-token, off-scale-length,
+    ds-class-override, legacy-alias, hand-rolled-control, shadow-component, foreign-ui-lib,
+    missing-scale, palette-gap, override-hotspot. `max_findings` caps what THIS reply shows
+    (most severe first); the report files always hold everything.
+
+    Returns a markdown summary — a 0-100 adherence score, counts by rule, and findings grouped
+    by theme with file:line evidence, split into two LANES: design-system gaps (file in the DS
+    repo: "add a type scale") and consumer violations (fix in the audited repo: "use
+    var(--pl-x)") — plus the paths of the full .md and .json reports. Verify the top findings
+    by reading the cited lines before filing anything."""
+    raw = (path or "").strip()
+    if not raw:
+        return "ds_audit_repo: pass a local path (or an onboarded `owner/repo`)."
+    target: Path | None = None
+    slug = _SLUG_RE.match(raw)
+    if slug and not raw.startswith((".", "/", "~")) and not Path(raw).expanduser().exists():
+        want = slug.group(1).lower()
+        for p in _registered_projects():
+            gh = str(p.get("github") or "").lower().removeprefix("https://github.com/").strip("/")
+            if gh == want:
+                target = Path(str(p["path"])).expanduser()
+                break
+        if target is None:
+            return (
+                f"ds_audit_repo: {slug.group(1)} isn't checked out on this host. Run "
+                f"onboard_project(\"{slug.group(1)}\") first — it clones under the onboarding root and "
+                "registers the project — then call ds_audit_repo again with that repo or the path it reports. "
+                "(This tool reads local checkouts only; it never clones.)"
+            )
+    if target is None:
+        target = Path(raw).expanduser()
+    try:
+        target = target.resolve()
+    except OSError as e:
+        return f"ds_audit_repo: can't resolve {raw}: {e}"
+    if not target.is_dir():
+        return f"ds_audit_repo: {target} is not a directory on this host."
+    roots = _allowed_roots()
+    if not any(target == r or target.is_relative_to(r) for _, r in roots):
+        listed = "; ".join(f"{label}: {r}" for label, r in roots) or "none configured"
+        return (
+            f"Refused: {target} is outside every root this tool may read ({listed}). Remedy: "
+            "onboard it with onboard_project (clones under the onboarding root), register it as a "
+            "project in Settings ▸ Projects, or add its parent directory to this plugin's "
+            "`audit_roots` setting (Settings ▸ Plugins ▸ Design System)."
+        )
+    au = _audit_mod()
+    wanted = [r.strip() for r in (rules or "").split(",") if r.strip()]
+    unknown = [r for r in wanted if r not in au.RULES]
+    if unknown:
+        return f"ds_audit_repo: unknown rule id(s) {', '.join(unknown)}. Valid: {', '.join(au.RULES)}"
+    try:
+        vocab = _vocab()
+    except RuntimeError as e:
+        return f"ds_audit_repo error (couldn't load the design system's tokens): {e}"
+    try:
+        inventory = _inventory()
+    except Exception:  # noqa: BLE001 — the inventory only sharpens two rules; never fail the audit on it
+        inventory = []
+    result = au.audit_tree(target, vocab, inventory=inventory, include_globs=include, exclude_globs=exclude, rules=wanted or None)
+    findings, summary = result["findings"], result["summary"]
+
+    import time
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", target.name) or "repo"
+    out_dir = _data_dir() / "audits"
+    title = f"Design-system audit — {target}"
+    report_md = report_json = None
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        report_md = out_dir / f"{name}-{stamp}.md"
+        report_json = out_dir / f"{name}-{stamp}.json"
+        report_md.write_text(au.render_markdown(findings, summary, title=title, per_group=25, groups_per_rule=100, vocab=vocab), encoding="utf-8")
+        report_json.write_text(au.render_json(findings, summary, root=str(target), vocab=vocab), encoding="utf-8")
+        _prune_reports(out_dir, name)
+    except OSError as e:
+        log.warning("[design-system] could not write audit report: %s", e)
+
+    order = {"error": 0, "warn": 1, "info": 2}
+    ds_lane = [f for f in findings if f["lane"] == "ds"]
+    consumer = sorted((f for f in findings if f["lane"] == "consumer"), key=lambda f: order.get(f["severity"], 3))
+    try:
+        cap = max(1, int(max_findings or 400))
+    except (TypeError, ValueError):
+        cap = 400
+    shown = ds_lane + consumer[:cap]
+    md = au.render_markdown(shown, summary, title=title, per_group=4, groups_per_rule=8, vocab=vocab)
+    notes = []
+    if len(consumer) > cap:
+        notes.append(f"_This reply shows the {cap} most severe of {len(consumer)} consumer findings; the report files hold all of them._")
+    if summary.get("truncated"):
+        notes.append(f"_File limit reached ({summary.get('max_files')} files) — narrow with `include`._")
+    if not inventory:
+        notes.append("_Component inventory unavailable — hand-rolled-control used the default map and shadow-component was skipped._")
+    if report_md:
+        notes.append(f"Full report: `{report_md}` (markdown) · `{report_json}` (JSON, every finding).")
+    return md + ("\n" + "\n".join(notes) if notes else "")
+
+
+# ── drift snapshot + watch ─────────────────────────────────────────────────────
+
+
+def _snap_path() -> Path:
+    """Instance-scoped drift snapshot, in the plugin data dir (see ``_data_dir``)."""
+    return _data_dir() / "snapshot.json"
 
 
 def _fingerprint() -> dict:
@@ -832,27 +1161,39 @@ def _build_data_router():
         a stale class vocabulary with no way to refresh it, so a prototype could be written
         against classes the kit no longer ships.
         """
-        global _SB_CACHE, _KIT_CACHE
+        global _SB_CACHE, _KIT_CACHE, _VOCAB_CACHE, _INV_CACHE
         _SB_CACHE = None
         _KIT_CACHE = None
-        return {"ok": True, "cleared": ["storybook", "kit-classes"]}
+        _VOCAB_CACHE = None
+        _INV_CACHE = None
+        return {"ok": True, "cleared": ["storybook", "kit-classes", "vocabulary", "inventory"]}
 
     return router
 
 
+def _parse_roots(value) -> list[str]:
+    """``audit_roots`` arrives as a list (YAML / string_list setting) or a newline/comma string."""
+    if not value:
+        return []
+    if isinstance(value, str):
+        value = re.split(r"[\n,]", value)
+    return [str(v).strip() for v in value if str(v).strip()]
+
+
 def register(registry) -> None:
-    global _EMIT
+    global _EMIT, _AUDIT_ROOTS
     cfg = registry.config or {}
     _EMIT = getattr(registry, "emit", None)
     for k in _DEFAULTS:
         v = cfg.get(k)
         if v not in (None, ""):
             _CFG[k] = str(v)
+    _AUDIT_ROOTS = _parse_roots(cfg.get("audit_roots"))
     # View PAGE: public /plugins/design-system (ungated) — iframe nav carries no bearer.
     registry.register_router(_build_view_router(), prefix="/plugins/design-system")
     # DATA: gated /api/plugins/design-system — fetched with the handshake token.
     registry.register_router(_build_data_router(), prefix="/api/plugins/design-system")
-    registry.register_tools([ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_search, ds_kit_classes, ds_rules, ds_check, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply])
+    registry.register_tools([ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_search, ds_kit_classes, ds_rules, ds_check, ds_audit_repo, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply])
 
     # design-critic subagent (ADR 0018) — reviews a prototype/component against the LIVE DS + a11y,
     # grounded via the ds_* tools above. The lead delegates to it with `task("design-critic", …)`.
@@ -875,4 +1216,4 @@ def register(registry) -> None:
         except Exception:  # noqa: BLE001 — a scheduler hiccup must never break plugin load
             log.exception("[design-system] failed to arm the drift watch")
 
-    log.info("[design-system] registered 14 tools + design-critic/ds-explainer/ds-designer subagents (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")
+    log.info("[design-system] registered 15 tools + design-critic/ds-explainer/ds-designer subagents (repo=%s@%s, drift-watch=%s)", _cfg("repo"), _cfg("ref"), cron or "off")

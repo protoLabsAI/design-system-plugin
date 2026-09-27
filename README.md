@@ -26,8 +26,73 @@ from the repo at call time** — the anti-drift principle, as tools.
 | `ds_rules` | the visual-identity rules (when to use what, what we don't do) |
 | `ds_search <keyword>` | components, variants **and** tokens matching a keyword — the fastest "do we have a…" |
 | `ds_kit_classes` | the `.pl-*` classes the DS's published kit stylesheet actually defines — the vocabulary a no-build prototype can use |
-| `ds_check <css\|jsx>` | flags a hardcoded hex a token already defines → the token to use instead |
+| `ds_check <code> [filename]` | lints a snippet with the audit engine (every rule below) → the token / component to use instead, with ΔE for near-miss colors |
+| `ds_audit_repo <path> [include] [exclude] [rules] [max_findings]` | audits a **local checkout** (or an onboarded `owner/repo`) for design-system adherence → a 0-100 score and a report split into **DS gaps** vs **consumer fixes**, written as `.md` + `.json` to the plugin data dir |
 | `ds_drift` | what changed since the last check (tokens + components); updates a snapshot |
+
+## Auditing a repo — `ds_audit_repo`
+
+The same rule engine that powers `ds_check` walks a local checkout and reports how well it
+upholds the design system. Two pure modules do the work, so a URL auditor can reuse them on
+fetched CSS and computed styles:
+
+- **`vocab.py`** — the token vocabulary built from the DS's `tokens.css` (themes resolved
+  structurally by `tokens.parse_css`): every var name, per-theme values, value → var reverse
+  maps, `nearest_color` by **CIEDE2000** (the DS's `oklch()` tokens included), and the
+  length scales (space / radius / font-size / shadow) with `nearest_length`. A scale needs
+  ≥ 2 distinct tokens; a DS with one radius token has a *value*, not a scale, and the auditor
+  says so once instead of flagging every radius.
+- **`audit.py`** — the rules, the repo walker and the report renderers.
+
+| Rule | Lane | What it catches |
+|---|---|---|
+| `raw-color` | consumer | literal colors (hex / rgb / hsl / oklch / named) instead of `var(--pl-*)` — exact token, near token (ΔE), token-at-alpha (`color-mix`), or no close token |
+| `stale-fallback` | consumer | `var(--pl-x, <fallback>)` whose fallback matches the token in **no** theme |
+| `unknown-token` | consumer | `var(--pl-foo)` the DS doesn't define (typo / removed) |
+| `off-scale-length` | consumer | hardcoded font-size / radius / gap-margin-padding / box-shadow where a token scale exists |
+| `ds-class-override` | consumer | app CSS whose selector **subject** is a DS class (`.x .pl-dialog__body {}`) — forking the component |
+| `legacy-alias` | consumer | app custom properties (`--brand-indigo: #6366f1`, or `var(--brand-indigo, #6366f1)`) duplicating a token's value |
+| `hand-rolled-control` | consumer | raw `<button>`/`<input>`/`<select>`/`<textarea>`/`<dialog>` in JSX when the DS ships the component |
+| `shadow-component` | consumer | local components named like a DS component (`StatusDot`), or a `*Chip` family that doesn't use the DS one |
+| `foreign-ui-lib` | consumer | imports of MUI, Chakra, antd, shadcn `@/components/ui`, raw `@radix-ui/*`, Bootstrap, … |
+| `namespace-squat` | consumer | the app defines `--pl-*` names the DS doesn't ship (silences `unknown-token`, collides later) |
+| `missing-scale` | **ds** | the DS has no scale for a property the app sets by hand — ONE finding with the value histogram |
+| `scale-gap` | **ds** | a DS scale lacks a step the app uses ≥ 10× or in ≥ 3 files (`gap: 6px` ×141) |
+| `palette-gap` | **ds** | a color with no close token, used ≥ 3× across ≥ 2 files |
+| `override-hotspot` | **ds** | a DS class overridden in ≥ 3 blocks across ≥ 2 files — the component needs a variant/prop |
+
+**Lanes** are the point: `ds` findings get filed on the design-system repo ("add a type
+scale"), `consumer` findings on the audited repo ("use `var(--pl-color-accent)`").
+
+**Adherence score** = `100 × good / (good + penalty)`, where *good* = valid `var(--pl-*)`
+references + names imported from the DS packages, and *penalty* = the sum over consumer
+finding **groups** of `min(10, Σ weights)` with error 3 · warn 1 · info 0.25 — off-scale info
+weighs 0 (it's the DS's `scale-gap`), and 141 copies of one value are one decision, not 141.
+DS-lane findings don't lower it — they aren't the consumer's to fix. The markdown report
+opens with a **Fix first** block (broken tokens, stale fallbacks, forks) before the rule table.
+
+A color literal is called *exact* only when it equals the token in **every** theme; matching
+one theme of a themed token (`#fff` = a light-mode surface) is reported as info, because
+swapping it in changes what the other theme renders.
+
+**Path safety.** `ds_audit_repo` reads only under the host's project-onboarding root, a
+registered project / work folder (ADR 0095 / 0007), or this plugin's `audit_roots` setting —
+the path is `resolve()`d first, so `..` and symlinks can't escape. Given an `owner/repo` that
+isn't checked out it tells the agent to run `onboard_project` first; it never clones.
+
+**Low false positives by construction:** comments are masked (positions preserved), `url()` /
+`data:` URIs are skipped, a bare `#123`/`#add` in TS is an issue ref or anchor unless it sits
+in a color context, `<button>` inside a JS string is text, SVG presentation colors are `info`.
+The walker never reads dot-dirs, `node_modules`, `dist`, `build`, `out`, vendored code,
+coverage, test dirs (`tests`, `__tests__`, `e2e`, `fixtures`, …), stories, snapshots,
+minified files or the token file (`public/` is scanned). It reads **regular files only** —
+symlinks and FIFOs/devices are skipped, reads are bounded (1.5 MB) and never trust `st_size` —
+and the whole audit has a 60 s budget, after which it stops and says so. Suppress a
+deliberate line with a `ds-audit-ignore` comment (optionally `ds-audit-ignore raw-color`),
+`ds-audit-ignore-next-line`, or a whole file with `ds-audit-ignore-file`.
+
+The workflow — onboard → audit → triage by lane → verify → file grouped issues — is the
+`auditing-a-repo` skill.
 
 ## The explorer — a browse surface, and only that
 
@@ -115,6 +180,9 @@ into a real `packages/ui` PR.
 
 ## Skill
 
+`skills/auditing-a-repo/SKILL.md` carries the audit workflow (onboard → `ds_audit_repo` →
+triage by lane → verify → file grouped issues, DS gaps in the established gap format).
+
 `skills/using-the-design-system/SKILL.md` auto-loads and carries the agent-facing contract:
 *never name a component, variant, prop or token you have not read from a tool this turn*; search
 before you build; say the system doesn't cover something rather than inventing a token; render
@@ -144,6 +212,7 @@ operator_mcp_tools:
   - ds_kit_classes   # the no-build class vocabulary
   - ds_rules         # the visual-identity rules
   - ds_check         # lint a snippet against the tokens
+  - ds_audit_repo    # audit a local checkout (reads only under the allowed roots)
 ```
 
 The allowlist is **deny-by-default**, so a foreign client gets only what you name (`"*"` exposes
@@ -175,6 +244,7 @@ design-system:
   rules_path: docs/reference/visual-identity.md
   storybook_url: https://protocontent-storybook.pages.dev   # "" = gallery off
   watch_cron: "0 14 * * *"   # "" = watch off
+  audit_roots: []            # extra dirs ds_audit_repo may read (onboarding root + projects always allowed)
 ```
 
 `tokens_css_path` is read in preference to `tokens_path` because the **generated CSS is the
@@ -201,6 +271,7 @@ python -m server plugin install https://github.com/protoLabsAI/design-system-plu
 
 ## Roadmap
 
-- `ds_check` beyond hex: spacing/radius/type literals, Tailwind arbitrary values (`[#…]`, `[13px]`).
+- Audit a live URL on top of `vocab.py` + `audit.py` (fetched stylesheets + computed styles).
+- Tailwind arbitrary lengths (`p-[13px]`, `text-[11px]`) in `off-scale-length`.
 - component-level a11y hints from the stories; a `doc-sync` companion that opens the docs PR the
   drift watch describes.

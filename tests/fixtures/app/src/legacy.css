@@ -1,0 +1,4 @@
+.hitl { border: 1px solid var(--pl-color-accent, var(--brand-indigo, #6366f1)); }
+.hitl-2 { color: var(--legacy-accent, #9b87f2); font-size: 12px; }
+.x .pl-button:hover { color: var(--pl-color-accent); }
+.y > .pl-button { color: var(--pl-color-accent); }
