@@ -367,6 +367,25 @@ class Vocab:
                 return True
         return False
 
+    def themes_matching(self, name: str, value: str, tol: float = 0.5) -> list[str]:
+        """The themes in which ``name``'s value equals ``value`` (colors: ΔE < ``tol`` and the
+        same alpha; anything else: normalized text). A themed token matched in only ONE theme
+        is not a safe swap — the literal and the token differ in the other."""
+        want = parse_color(value)
+        out = []
+        for theme in self.themes:
+            raw = self.resolved(name, theme)
+            if raw is None:
+                continue
+            have = parse_color(raw)
+            if want is not None and have is not None:
+                de, da = color_distance(want, have)
+                if de < tol and da < 0.01:
+                    out.append(theme)
+            elif normalize_value(raw) == normalize_value(value):
+                out.append(theme)
+        return out
+
     def resolved(self, name: str, theme: str, depth: int = 0) -> str | None:
         """A token's value with ``var(--pl-other)`` references followed (within the theme)."""
         raw = self.themes.get(theme, {}).get(name)
@@ -415,7 +434,7 @@ class Vocab:
 
     def has_scale(self, kind: str) -> bool:
         if kind == "shadow":
-            return len({v for _, v in self.shadows}) >= MIN_SCALE
+            return len({n for n, _ in self.shadows}) >= MIN_SCALE
         return len({px for _, px in self.scale(kind)}) >= MIN_SCALE
 
     def missing_scales(self) -> list[str]:
@@ -446,7 +465,7 @@ class Vocab:
             "themes": sorted(self.themes),
             "colors": len(self.colors),
             "scales": {k: [f"{n}={px:g}px" for n, px in self.scale(k)] for k in ("space", "radius", "font-size")},
-            "shadows": [n for n, _ in self.shadows],
+            "shadows": list(dict.fromkeys(n for n, _ in self.shadows)),
             "missing_scales": self.missing_scales(),
         }
 
@@ -494,6 +513,12 @@ def build_vocab(tokens_css: str = "", tokens_json: str | dict | None = None, ext
         parsed = _tokens.parse_css(tokens_css)
         if parsed.get("dark"):
             themes, source = parsed, "css"
+        else:
+            # No bare :root (a `:host` / `.theme` / `html` token file): every declaration in
+            # every block, one theme. Better than an empty vocabulary that flags every var.
+            flat = dict(re.findall(r"(--[a-zA-Z0-9-]+)\s*:\s*([^;{}]+);", re.sub(r"/\*.*?\*/", " ", tokens_css, flags=re.DOTALL)))
+            if flat:
+                themes, source = {"default": {k: v.strip() for k, v in flat.items()}}, "css"
     if not themes and tokens_json:
         data = tokens_json
         if isinstance(data, str):
@@ -519,7 +544,14 @@ def build_vocab(tokens_css: str = "", tokens_json: str | dict | None = None, ext
     base = themes.get("dark") or themes.get("default") or {}
     for kind, pat in _SCALE_PATTERNS.items():
         if kind == "shadow":
-            v.shadows = [(n, normalize_value(val)) for n, val in base.items() if pat.search(n) and _tokens.classify(val) == "shadow"]
+            # Every theme's face of every shadow token — a light-mode shadow written by hand
+            # is just as much a copy as a dark one.
+            seen: set[tuple[str, str]] = set()
+            for theme_vals in themes.values():
+                for n, val in theme_vals.items():
+                    if pat.search(n) and _tokens.classify(val) == "shadow" and (n, normalize_value(val)) not in seen:
+                        seen.add((n, normalize_value(val)))
+                        v.shadows.append((n, normalize_value(val)))
             continue
         entries = []
         for n, val in base.items():

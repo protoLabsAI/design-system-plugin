@@ -445,7 +445,9 @@ def _vocab(force: bool = False):
     except RuntimeError as e:
         errors.append(str(e))
     tokens_json = None
-    if "--" not in css:
+    if not vm.build_vocab(css).names:
+        # No custom properties parsed out of the CSS (missing, empty, or a shape we can't
+        # read) — the JSON token source is the fallback, never an empty vocabulary.
         try:
             tokens_json = _gh_get_raw(_cfg("tokens_path"))
         except RuntimeError as e:
@@ -503,9 +505,16 @@ def _inventory(force: bool = False) -> list[str]:
 
 
 def _guess_filename(code: str) -> str:
-    if re.search(r"className=|=>|\bimport\s|<[A-Z][A-Za-z]*[\s/>]|\breturn\s*[(<]|\bexport\s+(default\s+)?(function|const)\b|style=\{\{", code):
+    """Pick a language for an unnamed snippet. CSS is the fallback only when the code looks
+    like CSS; a bare literal or a Tailwind class string is treated as markup/JS, where any
+    quoted or arbitrary-value hex is judged (not only ones inside declarations)."""
+    if re.search(
+        r"className=|=>|\bimport\s|<[A-Z][A-Za-z]*[\s/>]|\breturn\s*[(<]|\bexport\s+(default\s+)?(function|const)\b"
+        r"|style=\{\{|\b(const|let|var)\s+\w+\s*=|\[#[0-9a-fA-F]{3,8}\]",
+        code,
+    ):
         return "snippet.tsx"
-    if re.search(r"<(div|span|section|html|body|button|style)\b", code, re.IGNORECASE):
+    if re.search(r"<(div|span|section|html|body|button|style|svg|path|circle|rect|a|p|input)\b", code, re.IGNORECASE):
         return "snippet.html"
     return "snippet.css"
 
@@ -523,10 +532,11 @@ def _format_findings(findings: list[dict], limit: int = 60) -> list[str]:
 
 @tool
 def ds_check(code: str, filename: str = "") -> str:
-    """Lint a CSS / SCSS / JSX / TSX / HTML snippet against the LIVE design system — the same
-    rule engine ds_audit_repo runs over a whole repo. Flags: literal colors (with the exact or
-    nearest `var(--pl-…)` token and its ΔE), `var(--pl-x, fallback)` whose fallback no longer
-    matches the token, `var(--pl-…)` names the DS doesn't define, hardcoded font-size/radius/
+    """Lint a CSS / SCSS / JSX / TSX / HTML / Tailwind snippet against the LIVE design system —
+    the same rule engine ds_audit_repo runs over a whole repo. Flags: literal colors anywhere,
+    including Tailwind arbitrary values like `bg-[#9b87f2]` (with the exact or nearest
+    `var(--pl-…)` token / Tailwind utility to use and its ΔE), `var(--pl-x, fallback)` whose
+    fallback no longer matches the token, `var(--pl-…)` names the DS doesn't define, hardcoded font-size/radius/
     spacing/shadow values where a token scale exists, app CSS restyling `.pl-*` classes, local
     aliases of token values, raw <button>/<input>/… where the DS ships a component, and imports
     of competing UI kits. `filename` (e.g. "Card.tsx", "card.css") picks the language; omitted,
@@ -547,7 +557,9 @@ def ds_check(code: str, filename: str = "") -> str:
         except Exception:  # noqa: BLE001 — the inventory only sharpens two rules
             inventory = []
     ctx = au.AuditContext(inventory=inventory)
-    findings = au.audit_text(code, fname, vocab, ctx=ctx)
+    # Unnamed snippets are fragments of unknown shape: `loose` judges every hex when there
+    # are no CSS declarations to anchor on ("#ff0000", "bg-[#9b87f2] text-white").
+    findings = au.audit_text(code, fname, vocab, ctx=ctx, loose=not (filename or "").strip())
     findings, _summary = au.finalize(findings, ctx, vocab)
     if not findings:
         return "ds_check: no hardcoded colors, stale fallbacks, unknown tokens or off-system patterns — clean. ✓"
@@ -616,6 +628,22 @@ def _data_dir() -> Path:
     return base
 
 
+REPORTS_KEPT = 10  # per audited target; older report pairs are deleted on each new audit
+
+
+def _prune_reports(out_dir: Path, name: str, keep: int = REPORTS_KEPT) -> None:
+    """Keep the newest ``keep`` report pairs for one target — reports are big and a scheduled
+    audit would otherwise grow the data dir forever. Stamps sort chronologically."""
+    for ext in (".md", ".json"):
+        pat = re.compile(re.escape(name) + r"-\d{8}-\d{6}" + re.escape(ext) + "$")
+        mine = sorted(p for p in out_dir.iterdir() if pat.match(p.name))
+        for old in mine[:-keep] if keep > 0 else mine:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+
 _SLUG_RE = re.compile(r"^(?:https?://github\.com/)?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 
 
@@ -630,8 +658,11 @@ def ds_audit_repo(path: str, include: str = "", exclude: str = "", rules: str = 
     `onboard_project("owner/repo")` first, then call this again.
 
     `include` / `exclude`: comma-separated globs on the path relative to `path` (e.g.
-    include="apps/web/src/*"); node_modules, dist, build, .git, tests, stories, snapshots,
-    minified files and the token file itself are always skipped. `rules`: comma-separated rule
+    include="apps/web/src/*"). Always skipped: dot-directories, node_modules, dist, build, out,
+    vendor(ed), third_party, coverage, framework caches (.next, .svelte-kit, …), test dirs
+    (tests, test, __tests__, e2e, fixtures, __mocks__, __snapshots__), storybook-static,
+    *.test.*, *.spec.*, *.stories.*, *.d.ts, *.min.*, the token file itself, symlinks and
+    special files. `public/` IS scanned. The audit stops after 60 s and says so. `rules`: comma-separated rule
     ids to run (default all): raw-color, stale-fallback, unknown-token, off-scale-length,
     ds-class-override, legacy-alias, hand-rolled-control, shadow-component, foreign-ui-lib,
     missing-scale, palette-gap, override-hotspot. `max_findings` caps what THIS reply shows
@@ -687,7 +718,10 @@ def ds_audit_repo(path: str, include: str = "", exclude: str = "", rules: str = 
         vocab = _vocab()
     except RuntimeError as e:
         return f"ds_audit_repo error (couldn't load the design system's tokens): {e}"
-    inventory = _inventory()
+    try:
+        inventory = _inventory()
+    except Exception:  # noqa: BLE001 — the inventory only sharpens two rules; never fail the audit on it
+        inventory = []
     result = au.audit_tree(target, vocab, inventory=inventory, include_globs=include, exclude_globs=exclude, rules=wanted or None)
     findings, summary = result["findings"], result["summary"]
 
@@ -704,13 +738,17 @@ def ds_audit_repo(path: str, include: str = "", exclude: str = "", rules: str = 
         report_json = out_dir / f"{name}-{stamp}.json"
         report_md.write_text(au.render_markdown(findings, summary, title=title, per_group=25, groups_per_rule=100, vocab=vocab), encoding="utf-8")
         report_json.write_text(au.render_json(findings, summary, root=str(target), vocab=vocab), encoding="utf-8")
+        _prune_reports(out_dir, name)
     except OSError as e:
         log.warning("[design-system] could not write audit report: %s", e)
 
     order = {"error": 0, "warn": 1, "info": 2}
     ds_lane = [f for f in findings if f["lane"] == "ds"]
     consumer = sorted((f for f in findings if f["lane"] == "consumer"), key=lambda f: order.get(f["severity"], 3))
-    cap = max(1, int(max_findings or 400))
+    try:
+        cap = max(1, int(max_findings or 400))
+    except (TypeError, ValueError):
+        cap = 400
     shown = ds_lane + consumer[:cap]
     md = au.render_markdown(shown, summary, title=title, per_group=4, groups_per_rule=8, vocab=vocab)
     notes = []

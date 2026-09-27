@@ -148,11 +148,21 @@ def test_kit_custom_properties_become_known_names():
 
 
 def test_raw_color_exact_near_and_far(V):
-    f, _ = _run(".a { color: #9b87f2; background: #9580ee; border-color: #123456; }", "a.css", V)
+    f, _ = _run(".a { color: #6366f1; background: #9580ee; border-color: #123456; }", "a.css", V)
     exact, near, far = [x for x in f if x["rule"] == "raw-color"]
-    assert "exactly var(--pl-color-accent)" in exact["message"] and "won't follow the theme" in exact["message"]
+    # Unthemed brand-indigo matches in every theme → exact; accent matches only in light → a note.
+    assert "exactly var(--pl-color-brand-indigo)" in exact["message"] and exact["severity"] == "warn"
+    assert "var(--pl-color-accent)'s light value" in exact["message"]
     assert "≈ var(--pl-color-accent)" in near["message"] and 1 < near["delta_e"] < 5
     assert "not a design token" in far["message"]
+
+
+def test_theme_partial_match_is_not_called_exact(V):
+    """REGRESSION: `.devices-qr{background:#fff}` was told to use bg-raised — whose DARK value
+    would have put a QR code on near-black. One theme's value is not the token."""
+    f, _ = _run(".qr { background: #9b87f2; }", "a.css", V)
+    assert f[0]["severity"] == "info" and "dark value only" in f[0]["message"]
+    assert "ds-audit-ignore" in f[0]["suggestion"] and "exactly" not in f[0]["message"]
 
 
 def test_raw_color_negatives(V):
@@ -164,8 +174,11 @@ def test_raw_color_negatives(V):
 
 
 def test_translucent_token_color_suggests_color_mix(V):
+    f, _ = _run(".a { background: rgba(99, 102, 241, 0.12); }", "a.css", V)
+    assert "color-mix(in srgb, var(--pl-color-brand-indigo) 12%, transparent)" in f[0]["suggestion"]
+    # Not through a THEMED token that only matches one theme (accent is #9b87f2 dark / #6366f1 light).
     f, _ = _run(".a { background: rgba(155, 135, 242, 0.12); }", "a.css", V)
-    assert "color-mix(in srgb, var(--pl-color-accent) 12%, transparent)" in f[0]["suggestion"]
+    assert "color-mix" not in f[0]["suggestion"]
 
 
 def test_raw_color_in_tsx_needs_a_color_context(V):
@@ -225,10 +238,13 @@ def test_missing_scale_aggregates_to_one_ds_gap(V):
     assert "12px ×3" in gaps[0]["suggestion"]
 
 
-def test_single_token_value_is_still_a_direct_hit(V):
-    f, ctx = _run(".a { border-radius: 4px; } .b { border-radius: 999px; } .c { border-radius: 50%; }", "a.css", V)
-    assert [x["message"] for x in f] == ["hardcoded border-radius: 4px is exactly var(--pl-radius)"]
-    assert not ctx.missing
+def test_a_lone_token_is_not_a_scale_so_its_value_goes_to_the_gap(V):
+    """`border-radius: 4px → use --pl-radius` reads fine alone, but it's the same advice as
+    `font-size: 14px → use --pl-font-base-size` — odd when the other values have nowhere to
+    go. With no scale, every hardcoded value is evidence for the DS gap instead."""
+    f, ctx = _run(".a { border-radius: 4px; } .b { border-radius: 999px; } .c { border-radius: 50%; } .d { font-size: 14px; }", "a.css", V)
+    assert f == []
+    assert [o["value"] for o in ctx.missing["radius"]] == ["4px"] and [o["value"] for o in ctx.missing["font-size"]] == ["14px"]
 
 
 def test_box_shadow_owns_its_colors(V):
@@ -431,8 +447,8 @@ def plugin(monkeypatch, tmp_path):
 
 
 def test_ds_check_runs_the_engine(plugin):
-    out = plugin.ds_check.invoke({"code": ".a { color: #9b87f2; border: 1px solid var(--pl-color-bg, #111); font-size: 13px; }"})
-    assert "[raw-color·warn]" in out and "var(--pl-color-accent)" in out
+    out = plugin.ds_check.invoke({"code": ".a { color: #6366f1; border: 1px solid var(--pl-color-bg, #111); font-size: 13px; }"})
+    assert "[raw-color·warn]" in out and "var(--pl-color-brand-indigo)" in out
     assert "[stale-fallback·warn]" in out
     assert "Design-system gaps" in out and "type (font-size)" in out
 
@@ -511,3 +527,186 @@ def test_ds_audit_repo_is_registered_and_documented():
         assert step in skill, step
     src = (ROOT / "__init__.py").read_text()
     assert "ds_audit_repo," in src.split("registry.register_tools(")[1].split(")")[0]
+
+
+# ── adversarial-review regressions ────────────────────────────────────────────
+
+
+def _tree(tmp_path, files: dict[str, str]) -> Path:
+    root = tmp_path / "repo"
+    for rel, body in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    return root
+
+
+def test_walker_never_follows_symlinked_files_out_of_the_root(tmp_path, V):
+    """BLOCKER: os.walk lists symlinked FILES and read_text followed them — a link to a
+    secret outside the root leaked into the reply and the reports."""
+    secret = tmp_path / "outside" / "private.css"
+    secret.parent.mkdir()
+    secret.write_text(".x { color: #123456; } /* API_KEY=hunter2 */")
+    root = _tree(tmp_path, {"src/ok.css": ".a { color: #ff0000; }"})
+    (root / "src" / "leak.css").symlink_to(secret)
+    (root / "src" / "linkdir").symlink_to(secret.parent, target_is_directory=True)
+    res = audit.audit_tree(root, V)
+    assert {f["file"] for f in res["findings"] if f["file"]} == {"src/ok.css"}
+    assert "hunter2" not in json.dumps(res)
+    assert any("leak.css" in s and "symlink" in s for s in res["summary"]["skipped"])
+
+
+def test_walker_skips_fifos_and_device_links_without_hanging(tmp_path, V):
+    import os
+
+    root = _tree(tmp_path, {"src/ok.css": ".a { color: #ff0000; }"})
+    os.mkfifo(root / "src" / "pipe.css")                      # read_text would block forever
+    (root / "src" / "zero.css").symlink_to("/dev/zero")         # st_size 0, reads unbounded
+    res = audit.audit_tree(root, V, time_budget=10)
+    assert res["summary"]["files_scanned"] == 1
+    skipped = " ".join(res["summary"]["skipped"])
+    assert "pipe.css" in skipped and "zero.css" in skipped
+
+
+def test_read_bounded_caps_the_read_and_refuses_non_regular_files(tmp_path):
+    import os
+
+    big = tmp_path / "big.css"
+    big.write_bytes(b"a" * 101)
+    assert audit.read_bounded(big, limit=100) is None
+    assert audit.read_bounded(big, limit=101) == "a" * 101
+    link = tmp_path / "l.css"
+    link.symlink_to(big)
+    with pytest.raises(OSError):
+        audit.read_bounded(link)                                # O_NOFOLLOW
+    os.mkfifo(tmp_path / "p.css")
+    with pytest.raises(OSError):
+        audit.read_bounded(tmp_path / "p.css")                  # O_NONBLOCK + S_ISREG, no hang
+
+
+def test_large_file_is_linear_not_quadratic(V):
+    """MAJOR: per-candidate linear scans made a 16k-line, 1.1MB stylesheet take ~97 s."""
+    import time
+
+    lines = [f".c{i} {{ color: #{i % 4096:03x}; background: var(--q{i}, #{(i * 7) % 4096:03x}); margin: {i % 13}px; }}" for i in range(16000)]
+    t = time.monotonic()
+    fs = audit.audit_text("\n".join(lines), "big.css", V)
+    assert time.monotonic() - t < 20 and len(fs) > 16000
+
+
+def test_time_budget_stops_the_audit_and_says_so(tmp_path, V):
+    root = _tree(tmp_path, {f"src/f{i}.css": ".a { color: #ff0000; }" for i in range(5)})
+    res = audit.audit_tree(root, V, time_budget=1e-9)
+    assert res["truncated"] and res["summary"]["timed_out"]
+    assert res["summary"]["files_scanned"] < 5
+
+
+@pytest.mark.parametrize("code", ["#ff0000", "bg-[#9b87f2] text-white", "const brand = '#9b87f2';", '<svg><path fill="#9b87f2"/></svg>'])
+def test_ds_check_flags_bare_fragments_again(plugin, code):
+    """MAJOR (regression vs the hex-only ds_check): each of these came back 'clean' because an
+    unnamed snippet fell back to CSS mode, which only looks inside declarations."""
+    out = plugin.ds_check.invoke({"code": code})
+    assert "[raw-color·" in out, out
+
+
+def test_ds_check_docstring_still_mentions_tailwind():
+    assert "Tailwind" in ds.ds_check.description
+
+
+def test_recurring_off_scale_values_become_one_scale_gap_and_cost_no_score(V):
+    code = "\n".join(f".g{i} {{ gap: 6px; }}" for i in range(12)) + "\n.x { gap: 10px; }"
+    ctx = audit.AuditContext()
+    fs = audit.audit_text(code, "a.css", V, ctx=ctx)
+    allf, _summary = audit.finalize(fs, ctx, V)
+    gap = [f for f in allf if f["rule"] == "scale-gap"]
+    assert len(gap) == 1 and gap[0]["lane"] == "ds" and gap[0]["values"] == {"6px": 12}   # 10px ×1 isn't recurring
+    ctx.token_refs = 10
+    assert audit.score(allf, ctx) == 100                     # off-scale info weighs nothing
+
+
+def test_score_caps_each_group(V):
+    ctx = audit.AuditContext()
+    ctx.token_refs = 90
+    same = [{"rule": "raw-color", "group": "g", "severity": "warn", "lane": "consumer"}] * 500
+    assert audit.score(same, ctx) == 90                      # 90 / (90 + min(10, 500))
+
+
+def test_markdown_opens_with_fix_first_in_priority_order(V):
+    code = ".a { color: var(--pl-nope); }\n" + "\n".join(f".s{i} {{ padding: 8px; }}" for i in range(30))
+    ctx = audit.AuditContext()
+    allf, summary = audit.finalize(audit.audit_text(code, "a.css", V, ctx=ctx), ctx, V)
+    md = audit.render_markdown(allf, summary)
+    assert md.index("## Fix first") < md.index("| rule | lane | count |")
+    assert "`unknown-token` **--pl-nope**" in md.split("| rule |")[0]
+    table = md.split("| rule | lane | count |")[1]
+    assert table.index("`unknown-token`") < table.index("`off-scale-length`")
+
+
+def test_suppression_line_model_matches_findings(V):
+    """splitlines() also breaks on \\f / \\x85 / U+2028, which shifted suppressions."""
+    code = ".a { color: #ff0000; }\x0c\n.b { color: #ff0000; } /* ds-audit-ignore */\n.c{} .d { color: #ff0000; } /* ds-audit-ignore */"
+    f, _ = _run(code, "a.css", V)
+    assert [x for x in f if x["rule"] == "raw-color" and x["line"] != 1] == []
+
+
+def test_controls_inside_js_strings_are_text_and_kit_classes_are_on_system(V):
+    code = "const t = '<button>';\nconst u = `<select>`;\n<button className=\"pl-button\">ok</button>\n<button>raw</button>"
+    f, _ = _run(code, "A.tsx", V)
+    assert [x["line"] for x in f if x["rule"] == "hand-rolled-control"] == [4]
+
+
+def test_controls_are_checked_in_vue_svelte_and_html(V):
+    for fn in ("A.vue", "A.svelte", "a.html"):
+        f, _ = _run("<template><button>x</button><!-- <input> --></template>", fn, V)
+        assert [x["rule"] for x in f] == ["hand-rolled-control"], fn
+
+
+def test_lazy_wrapper_of_a_local_ds_wrapper_is_not_a_warn(V):
+    code = 'const Impl = lazy(() => import("./Markdown"));\nexport function Markdown() { return <Impl/>; }'
+    f, _ = _run(code, "LazyMarkdown.tsx", V, inventory=["Markdown"])
+    assert [(x["rule"], x["severity"]) for x in f] == [("shadow-component", "info")]
+
+
+def test_light_theme_shadows_are_known_too():
+    css = TOKENS_CSS.replace(":root[data-theme=\"light\"] {", ":root[data-theme=\"light\"] {\n  --pl-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.12);")
+    v = vocab.build_vocab(css)
+    assert v.shadow_for("0 1px 2px rgba(0,0,0,0.12)") == "--pl-shadow-card"
+    assert v.summary()["shadows"] == ["--pl-shadow-card", "--pl-shadow-popover"]
+
+
+def test_app_defining_its_own_pl_names_is_namespace_squatting(V):
+    f, _ = _run(":root { --pl-app-rail: 48px; --pl-color-bg: #000; } .a { width: var(--pl-app-rail); }", "a.css", V)
+    assert [(x["rule"], x["group"]) for x in f] == [("namespace-squat", "--pl-app-rail")]  # a real token redefined is theming
+
+
+def test_token_css_without_root_still_builds_a_vocabulary():
+    v = vocab.build_vocab(":host { --pl-color-bg: #000; --pl-space-2: 8px; }")
+    assert v.source == "css" and v.is_known("--pl-color-bg") and v.exact_colors("#000") == ["--pl-color-bg"]
+
+
+def test_vocab_falls_back_to_json_when_the_css_parses_empty(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_gh_get_raw", lambda p: "/* no vars */" if p.endswith(".css") else json.dumps({"color": {"x": "#9b87f2"}}))
+    assert plugin._vocab().source == "json"
+
+
+def test_ds_audit_repo_survives_a_broken_inventory_and_a_bad_max_findings(plugin, monkeypatch):
+    def boom(force=False):
+        raise ValueError("storybook is down")
+    monkeypatch.setattr(plugin, "_inventory", boom)
+    monkeypatch.setattr(plugin, "_AUDIT_ROOTS", [str(FIX)])
+    out = plugin.ds_audit_repo.func(path=str(FIX / "app"), max_findings="lots")
+    assert "Adherence score" in out and "inventory unavailable" in out
+
+
+def test_reports_are_pruned_per_target(plugin, monkeypatch, tmp_path):
+    monkeypatch.setattr(plugin, "REPORTS_KEPT", 2)
+    d = tmp_path / "r"
+    d.mkdir()
+    for i in range(5):
+        for ext in (".md", ".json"):
+            (d / f"app-2026010{i}-000000{ext}").write_text("x")
+    (d / "other-20260101-000000.md").write_text("x")
+    plugin._prune_reports(d, "app", keep=2)
+    assert sorted(p.name for p in d.iterdir()) == [
+        "app-20260103-000000.json", "app-20260103-000000.md", "app-20260104-000000.json", "app-20260104-000000.md",
+        "other-20260101-000000.md"]

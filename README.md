@@ -55,7 +55,9 @@ fetched CSS and computed styles:
 | `hand-rolled-control` | consumer | raw `<button>`/`<input>`/`<select>`/`<textarea>`/`<dialog>` in JSX when the DS ships the component |
 | `shadow-component` | consumer | local components named like a DS component (`StatusDot`), or a `*Chip` family that doesn't use the DS one |
 | `foreign-ui-lib` | consumer | imports of MUI, Chakra, antd, shadcn `@/components/ui`, raw `@radix-ui/*`, Bootstrap, … |
+| `namespace-squat` | consumer | the app defines `--pl-*` names the DS doesn't ship (silences `unknown-token`, collides later) |
 | `missing-scale` | **ds** | the DS has no scale for a property the app sets by hand — ONE finding with the value histogram |
+| `scale-gap` | **ds** | a DS scale lacks a step the app uses ≥ 10× or in ≥ 3 files (`gap: 6px` ×141) |
 | `palette-gap` | **ds** | a color with no close token, used ≥ 3× across ≥ 2 files |
 | `override-hotspot` | **ds** | a DS class overridden in ≥ 3 blocks across ≥ 2 files — the component needs a variant/prop |
 
@@ -63,8 +65,15 @@ fetched CSS and computed styles:
 scale"), `consumer` findings on the audited repo ("use `var(--pl-color-accent)`").
 
 **Adherence score** = `100 × good / (good + penalty)`, where *good* = valid `var(--pl-*)`
-references + names imported from the DS packages, and *penalty* = consumer findings weighted
-error 3 · warn 1 · info 0.25. DS-lane findings don't lower it — they aren't the consumer's to fix.
+references + names imported from the DS packages, and *penalty* = the sum over consumer
+finding **groups** of `min(10, Σ weights)` with error 3 · warn 1 · info 0.25 — off-scale info
+weighs 0 (it's the DS's `scale-gap`), and 141 copies of one value are one decision, not 141.
+DS-lane findings don't lower it — they aren't the consumer's to fix. The markdown report
+opens with a **Fix first** block (broken tokens, stale fallbacks, forks) before the rule table.
+
+A color literal is called *exact* only when it equals the token in **every** theme; matching
+one theme of a themed token (`#fff` = a light-mode surface) is reported as info, because
+swapping it in changes what the other theme renders.
 
 **Path safety.** `ds_audit_repo` reads only under the host's project-onboarding root, a
 registered project / work folder (ADR 0095 / 0007), or this plugin's `audit_roots` setting —
@@ -73,8 +82,12 @@ isn't checked out it tells the agent to run `onboard_project` first; it never cl
 
 **Low false positives by construction:** comments are masked (positions preserved), `url()` /
 `data:` URIs are skipped, a bare `#123`/`#add` in TS is an issue ref or anchor unless it sits
-in a color context, SVG presentation colors are `info`, `node_modules` / `dist` / `build` /
-tests / stories / snapshots / minified files / the token file are never read. Suppress a
+in a color context, `<button>` inside a JS string is text, SVG presentation colors are `info`.
+The walker never reads dot-dirs, `node_modules`, `dist`, `build`, `out`, vendored code,
+coverage, test dirs (`tests`, `__tests__`, `e2e`, `fixtures`, …), stories, snapshots,
+minified files or the token file (`public/` is scanned). It reads **regular files only** —
+symlinks and FIFOs/devices are skipped, reads are bounded (1.5 MB) and never trust `st_size` —
+and the whole audit has a 60 s budget, after which it stops and says so. Suppress a
 deliberate line with a `ds-audit-ignore` comment (optionally `ds-audit-ignore raw-color`),
 `ds-audit-ignore-next-line`, or a whole file with `ds-audit-ignore-file`.
 

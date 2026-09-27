@@ -50,6 +50,7 @@ import importlib.util as _ilu
 import json
 import os
 import re
+import stat
 from pathlib import Path
 
 
@@ -74,11 +75,16 @@ RULES: dict[str, dict] = {
     "hand-rolled-control": {"lane": "consumer", "summary": "Raw form controls where the DS ships a component"},
     "shadow-component": {"lane": "consumer", "summary": "Local components shadowing a DS component"},
     "foreign-ui-lib": {"lane": "consumer", "summary": "Imports of competing UI kits"},
+    "namespace-squat": {"lane": "consumer", "summary": "App-defined custom properties inside the DS's --pl-* namespace"},
     "missing-scale": {"lane": "ds", "summary": "The DS has no token scale for a property the app sets by hand"},
+    "scale-gap": {"lane": "ds", "summary": "A DS scale missing a step the app uses over and over"},
     "palette-gap": {"lane": "ds", "summary": "A color the app keeps needing that no token is close to"},
     "override-hotspot": {"lane": "ds", "summary": "A DS class overridden so often it needs a variant/prop"},
 }
-AGGREGATE_RULES = ("missing-scale", "palette-gap", "override-hotspot")
+AGGREGATE_RULES = ("missing-scale", "scale-gap", "palette-gap", "override-hotspot")
+# The order a reader should work the consumer lane in: broken first, forks next, polish last.
+CONSUMER_PRIORITY = ("unknown-token", "stale-fallback", "ds-class-override", "legacy-alias", "namespace-squat",
+                     "foreign-ui-lib", "shadow-component", "raw-color", "hand-rolled-control", "off-scale-length")
 
 # Default control → DS component map, used when no inventory is supplied. With an inventory,
 # the first candidate the DS actually ships wins, and an element with none is not flagged.
@@ -114,8 +120,9 @@ FOREIGN_UI = (
 DEFAULT_EXCLUDE_DIRS = frozenset({
     "node_modules", "dist", "build", "out", ".git", ".hg", ".svn", "vendor", "vendored", "third_party",
     "third-party", "coverage", ".next", ".nuxt", ".svelte-kit", ".turbo", ".cache", "__snapshots__",
-    "__tests__", "storybook-static", ".venv", "venv", "__pycache__", "public",
-})
+    "__tests__", "__mocks__", "__fixtures__", "tests", "test", "fixtures", "e2e", "storybook-static",
+    ".venv", "venv", "__pycache__",
+})  # plus every dot-directory. `public/` IS scanned: hand-written static CSS/HTML lives there.
 DEFAULT_EXCLUDE_GLOBS = ("*.min.*", "*.map", "*.snap", "*.test.*", "*.spec.*", "*.d.ts", "*tokens.css", "*.stories.*")
 EXTENSIONS = {
     ".css": "css", ".scss": "scss", ".sass": "scss", ".less": "scss",
@@ -123,6 +130,10 @@ EXTENSIONS = {
     ".html": "html", ".htm": "html", ".vue": "sfc", ".svelte": "sfc", ".astro": "sfc",
 }
 MAX_FILE_BYTES = 1_500_000
+DEFAULT_TIME_BUDGET = 60.0  # seconds for a whole audit_tree; past it the audit stops and says so
+# A group of identical findings (one token, one literal) stops costing score past this weight:
+# 141 copies of `gap: 6px` are one decision, not 141.
+GROUP_WEIGHT_CAP = 10.0
 
 SEVERITY_WEIGHT = {"error": 3.0, "warn": 1.0, "info": 0.25}
 
@@ -190,6 +201,32 @@ def mask_comments(text: str, kind: str) -> str:
     return "".join(out)
 
 
+def mask_strings(text: str) -> str:
+    """Blank the CONTENTS of JS string literals ('…', "…", `…`), keeping the quotes, length
+    and newlines. Quoted strings stop at a newline, which contains the damage from an
+    apostrophe in JSX text."""
+    out = list(text)
+    n, i = len(text), 0
+    while i < n:
+        c = text[i]
+        if c in "'\"`":
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == c or (c != "`" and text[j] == "\n"):
+                    break
+                j += 1
+            for k in range(i + 1, min(j, n)):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j + 1
+            continue
+        i += 1
+    return "".join(out)
+
+
 _IGNORE_RE = re.compile(r"ds-audit-ignore(-next-line)?(?![\w-])(?:[:\s]+([a-z][a-z,\s-]*))?")
 
 
@@ -200,7 +237,9 @@ def suppressions(text: str) -> tuple[bool, dict[int, set[str] | None]]:
     per_line: dict[int, set[str] | None] = {}
     if "ds-audit-ignore" not in text:
         return False, per_line
-    for ln, line in enumerate(text.splitlines(), 1):
+    # Split on "\n" ONLY — the same line model as findings (_Lines). splitlines() also breaks
+    # on \f, \x85, U+2028 and lone \r, which would shift every suppression below them.
+    for ln, line in enumerate(text.split("\n"), 1):
         for m in _IGNORE_RE.finditer(line):
             target = ln + 1 if m.group(1) else ln
             ids = {t for t in re.split(r"[,\s]+", m.group(2) or "") if t in RULES}
@@ -326,6 +365,7 @@ class AuditContext:
         self.local_vars: dict[str, list[str]] = {}  # name → [raw values]
         self.missing: dict[str, list[dict]] = {}    # scale kind → occurrences (no DS scale)
         self.far_colors: dict[str, list[dict]] = {}  # normalized color → occurrences
+        self.off_scale: dict[str, list[dict]] = {}   # scale kind → off-scale occurrences (scale-gap)
         self.overrides: dict[str, list[dict]] = {}  # DS class → rule-block occurrences
         self.token_refs = 0
         self.ds_imports = 0
@@ -385,6 +425,9 @@ _RADIUS_PROPS = re.compile(r"^border(-(top|bottom|start|end)-(left|right|start|e
 _JS_STYLE_PROPS = re.compile(
     r"(?<![\w$.-])(fontSize|borderRadius|border(?:Top|Bottom)(?:Left|Right)Radius|gap|rowGap|columnGap|margin(?:Top|Right|Bottom|Left|Block|Inline)?|padding(?:Top|Right|Bottom|Left|Block|Inline)?|boxShadow|color|backgroundColor|background|borderColor|fill|stroke|outlineColor)\s*:\s*"
 )
+_KEBAB_VALUE = re.compile(r"[^;`'\"{}\n]+")
+_JS_STYLE_VALUE = re.compile(r"(['\"`])([^'\"`\n]*)\1|(-?\d+(?:\.\d+)?)(?![\w.])")
+_URI_END = re.compile(r"['\"`)\s]")
 _KEBAB_DECL = re.compile(r"(?<![\w-])(--[A-Za-z0-9_-]+|[a-z][a-z-]*)\s*:\s*")
 
 _DEF_FUNC_RE = re.compile(r"(?:^|[\s;(){}])(?:export\s+(?:default\s+)?)?function\s+([A-Z][A-Za-z0-9_]*)\s*[(<]")
@@ -413,7 +456,8 @@ class _FileScan:
     """One file's audit. Split out so the rules can share the parsed structure
     (declarations, var() spans, excluded spans) instead of re-scanning."""
 
-    def __init__(self, text: str, filename: str, vocab, ctx: AuditContext):
+    def __init__(self, text: str, filename: str, vocab, ctx: AuditContext, loose: bool = False):
+        self.loose = loose
         self.text = text
         self.filename = filename
         self.kind = file_kind(filename) or "css"
@@ -431,8 +475,8 @@ class _FileScan:
             if m.group(0).lower().startswith("url("):
                 self.excluded.append((m.start(), _balanced(self.masked, m.end() - 1)))
             else:
-                end = re.search(r"['\"`)\s]", self.masked[m.end():])
-                self.excluded.append((m.start(), m.end() + (end.start() if end else 0)))
+                end = _URI_END.search(self.masked, m.end())
+                self.excluded.append((m.start(), end.start() if end else len(self.masked)))
 
         # var() references: (start, end, name, fallback_start|None, fallback_end)
         self.vars: list[tuple[int, int, str, int | None, int]] = []
@@ -443,6 +487,15 @@ class _FileScan:
 
         self.decls = self._declarations()
         self.selectors = self._selectors() if self.kind in ("css", "scss") else self._style_block_selectors()
+
+        # Offset indexes — every "is this offset inside X?" question is a bisect, not a scan
+        # (a linear scan per candidate made a 16k-line stylesheet take minutes).
+        self.excluded.sort()
+        self._excl_starts = [a for a, _ in self.excluded]
+        self.decls.sort(key=lambda d: d[2])
+        self._decl_starts = [d[2] for d in self.decls]
+        self._fb = sorted((v for v in self.vars if v[3] is not None), key=lambda v: v[3])
+        self._fb_starts = [v[3] for v in self._fb]
 
     # ── structure ────────────────────────────────────────────────────────────
     def _css_regions(self) -> list[tuple[int, int]]:
@@ -501,20 +554,21 @@ class _FileScan:
                 vs = m.end()
                 if vs in seen:
                     continue
-                vm = re.match(r"[^;`'\"{}\n]+", self.masked[vs:])
+                vm = _KEBAB_VALUE.match(self.masked, vs)
                 if not vm or not vm.group(0).strip():
                     continue
                 # Only when it reads like CSS: terminated by `;` (a JS object uses `,`).
-                after = self.masked[vs + vm.end(): vs + vm.end() + 1]
+                after = self.masked[vm.end(): vm.end() + 1]
                 if after != ";":
                     continue
                 val = vm.group(0).strip()
+                vs += len(vm.group(0)) - len(vm.group(0).lstrip())
                 out.append((prop.lower() if not prop.startswith("--") else prop, val, vs, vs + len(val)))
                 seen.add(vs)
             # React style objects: camelCase props.
             for m in _JS_STYLE_PROPS.finditer(self.masked):
                 vs = m.end()
-                vm = re.match(r"(['\"`])([^'\"`\n]*)\1|(-?\d+(?:\.\d+)?)(?![\w.])", self.masked[vs:])
+                vm = _JS_STYLE_VALUE.match(self.masked, vs)
                 if not vm or vs in seen:
                     continue
                 if vm.group(3) is not None:
@@ -549,19 +603,26 @@ class _FileScan:
             out.extend(self._selectors(a, b))
         return out
 
-    def _in(self, spans, offset: int) -> bool:
-        return any(a <= offset < b for a, b in spans)
+    def _in_excluded(self, offset: int) -> bool:
+        i = bisect.bisect_right(self._excl_starts, offset) - 1
+        # Excluded spans don't nest, but check a few back in case two touch.
+        return any(self.excluded[k][0] <= offset < self.excluded[k][1] for k in range(i, max(-1, i - 3), -1))
 
     def _enclosing_var(self, offset: int):
-        """The innermost var() whose FALLBACK contains ``offset`` (or None)."""
-        best = None
-        for v in self.vars:
-            if v[3] is not None and v[3] <= offset < v[4] and (best is None or v[3] > best[3]):
-                best = v
-        return best
+        """The innermost var() whose FALLBACK contains ``offset`` (or None). Fallback spans
+        nest (balanced parens), so walking back from the bisect point, the first span that
+        contains the offset is the innermost one; the walk is capped — real nesting is shallow."""
+        i = bisect.bisect_right(self._fb_starts, offset) - 1
+        for k in range(i, max(-1, i - 64), -1):
+            v = self._fb[k]
+            if v[3] <= offset < v[4]:
+                return v
+        return None
 
     def _decl_at(self, offset: int):
-        for d in self.decls:
+        i = bisect.bisect_right(self._decl_starts, offset) - 1
+        for k in range(i, max(-1, i - 4), -1):
+            d = self.decls[k]
             if d[2] <= offset < d[3] + 1:
                 return d
         return None
@@ -584,6 +645,10 @@ class _FileScan:
             self.rule_class_overrides()
         if r & {"legacy-alias"}:
             self.rule_alias_definitions()
+        if "namespace-squat" in r:
+            self.rule_namespace_squat()
+        if self.kind in ("html", "sfc") and "hand-rolled-control" in r:
+            self.rule_controls()
         if self.kind in ("js", "sfc"):
             self.count_ds_imports()
             if self.jsx and "hand-rolled-control" in r:
@@ -636,16 +701,23 @@ class _FileScan:
         """(offset, literal, from_svg_attr) for every color literal worth judging."""
         text = self.masked
         css_like = self.kind in ("css", "scss")
+        # Loose: a pasted fragment with no CSS structure at all ("#ff0000", "bg-[#9b87f2]").
+        # Every hex counts except a bare all-digit one (an issue reference).
+        loose = self.loose and not self.decls
         out = []
-        decl_spans = [(d[2], d[3] + 1) for d in self.decls]
         for m in _HEX_RE.finditer(text):
             off = m.start()
-            if css_like and not self._in(decl_spans, off):
+            if css_like and not loose and self._decl_at(off) is None:
                 continue  # `#add` in a selector is an id, not a color
+            if loose and not css_like and not m.group(1).isdigit():
+                out.append((off, m.group(0)))
+                continue
+            if css_like and loose and m.group(1).isdigit():
+                continue
             if not css_like:
                 hexd = m.group(1)
                 ctx_before = text[max(0, off - 48):off].split("\n")[-1]
-                in_decl = self._in(decl_spans, off)
+                in_decl = self._decl_at(off) is not None
                 quoted_whole = text[off - 1:off] in "'\"`" and text[m.end():m.end() + 1] in "'\"`"
                 arbitrary = text[off - 1:off] == "["  # tailwind bg-[#123456]
                 has_ctx = bool(_COLOR_CONTEXT.search(ctx_before)) or bool(_SVG_ATTR.search(ctx_before))
@@ -657,7 +729,7 @@ class _FileScan:
                     continue
             out.append((off, m.group(0)))
         for m in _COLOR_FUNC_RE.finditer(text):
-            if css_like and not self._in(decl_spans, m.start()):
+            if css_like and not loose and self._decl_at(m.start()) is None:
                 continue
             end = _balanced(text, m.end() - 1)
             lit = text[m.start():end]
@@ -680,7 +752,7 @@ class _FileScan:
             return
         seen: set[int] = set()
         for off, lit in sorted(self._color_candidates()):
-            if off in seen or self._in(self.excluded, off):
+            if off in seen or self._in_excluded(off):
                 continue
             seen.add(off)
             enc = self._enclosing_var(off)
@@ -711,17 +783,30 @@ class _FileScan:
         norm = vocab_mod.normalize_color(lit) or lit
         exact = v.exact_colors(lit)
         rgba = vocab_mod.parse_color(lit)
-        if exact:
-            name = exact[0]
-            also = [v.ref(x) for x in exact[1:3]]
-            themed = ""
-            if v.is_themed(name):
-                vals = v.values(name)
-                hit = [m["theme"] for m in matches if m["var"] == name]
-                which = f"its {hit[0]} value" if hit else "its value"
-                themed = f" ({which}; themed: " + ", ".join(f"{t} {vals[t]}" for t in vals) + ") — the literal won't follow the theme"
-            msg = f"hardcoded `{lit}` is exactly {v.ref(name)}{themed}"
+        # "Exact" only when the literal IS the token in every theme. Matching one theme of a
+        # themed token (#fff = bg-raised's LIGHT value) is a different claim: swapping it in
+        # changes what renders in the other theme — fatal for a QR code on white.
+        full = [n for n in exact if len(v.themes_matching(n, lit)) == len(v.values(n))]
+        partial = [n for n in exact if n not in full]
+        severity = "info" if svg else "warn"
+        if full:
+            name = full[0]
+            also = [v.ref(x) for x in full[1:3]]
+            msg = f"hardcoded `{lit}` is exactly {v.ref(name)}"
+            if partial:
+                p0 = partial[0]
+                msg += f" (also {v.ref(p0)}'s {'/'.join(v.themes_matching(p0, lit))} value — use that if it's the role meant)"
             sug = f"use {v.ref(name)}" + (f" (same value: {', '.join(also)})" if also else "")
+        elif partial:
+            name = partial[0]
+            which = "/".join(v.themes_matching(name, lit))
+            vals = v.values(name)
+            others = ", ".join(f"{t} {vals[t]}" for t in vals if t not in v.themes_matching(name, lit))
+            msg = f"hardcoded `{lit}` equals {v.ref(name)}'s {which} value only ({others} elsewhere)"
+            sug = (f"use {v.ref(name)} if this should follow the theme; if it must stay `{lit}` in every theme "
+                   "(a QR code, a brand mark), keep it and add a ds-audit-ignore comment")
+            severity = "info"
+            exact = partial
         elif rgba is not None and rgba[3] < 0.999 and (tint := self._opaque_tint(lit)):
             pct = round(rgba[3] * 100)
             msg = f"hardcoded `{lit}` is {v.ref(tint)} at {pct}% alpha"
@@ -734,7 +819,7 @@ class _FileScan:
             msg = f"hardcoded `{lit}` — not a design token (nearest {v.ref(best['var'])}, ΔE {best['delta_e']:g}{', α differs' if best['alpha_delta'] >= 0.01 else ''})"
             sug = f"use the closest role token ({v.ref(best['var'])}) if it fits, or propose a new token to the DS"
             self.ctx.far_colors.setdefault(norm, []).append({"file": self.filename, "line": self.lines.pos(off)[0], "literal": lit, "nearest": best["var"], "delta_e": best["delta_e"]})
-        f = _mk("raw-color", "info" if svg else "warn", self.filename, self.lines, off, msg, sug,
+        f = _mk("raw-color", severity, self.filename, self.lines, off, msg, sug,
                 group=(exact[0] if exact else best["var"] if best["distance"] < 5 else norm),
                 literal=lit, nearest=best["var"], delta_e=best["delta_e"], exact=bool(exact))
         self.add(f)
@@ -742,10 +827,14 @@ class _FileScan:
     def _opaque_tint(self, lit: str) -> str | None:
         """An OPAQUE token whose RGB matches a translucent literal (ΔE < 2.5) — the literal is
         that token at some alpha, and ``color-mix()`` expresses it without a new literal."""
+        rgba = vocab_mod.parse_color(lit)
         best = None
         for m in self.vocab.color_matches(lit, k=len(self.vocab.colors)):
-            tok = self.vocab.colors[m["var"]].get(m["theme"])
-            if m["delta_e"] < 2.5 and tok is not None and tok[3] >= 0.999 and (best is None or m["delta_e"] < best[1]):
+            faces = self.vocab.colors[m["var"]]
+            # Every theme's face must be this opaque color — tinting a themed token that only
+            # matches in one theme would change the other theme's rendering.
+            if m["delta_e"] < 2.5 and all(t[3] >= 0.999 and vocab_mod.color_distance((*rgba[:3], 1.0), t)[0] < 2.5 for t in faces.values()) \
+                    and (best is None or m["delta_e"] < best[1]):
                 best = (m["var"], m["delta_e"])
         return best[0] if best else None
 
@@ -783,14 +872,17 @@ class _FileScan:
     def _judge_length(self, kind: str, prop: str, tok: str, px: float, off: int) -> None:
         v = self.vocab
         near = v.nearest_length(kind, px)
+        if not v.has_scale(kind):
+            # One token is a value, not a scale: "font-size: 14px → use --pl-font-base-size" is
+            # odd advice when 12/13/11px have nowhere to go. It all belongs to the DS gap.
+            self.ctx.missing.setdefault(kind, []).append({"file": self.filename, "line": self.lines.pos(off)[0], "value": tok, "prop": prop, "px": px})
+            return
         if near and near[2] == 0:
             self.add(_mk("off-scale-length", "warn", self.filename, self.lines, off,
                          f"hardcoded {prop}: {tok} is exactly {v.ref(near[0])}",
                          f"use {v.ref(near[0])}", group=f"{kind}: {tok} → {near[0]}", value_px=px, scale=kind))
             return
-        if not v.has_scale(kind):
-            self.ctx.missing.setdefault(kind, []).append({"file": self.filename, "line": self.lines.pos(off)[0], "value": tok, "prop": prop, "px": px})
-            return
+        self.ctx.off_scale.setdefault(kind, []).append({"file": self.filename, "line": self.lines.pos(off)[0], "value": tok, "prop": prop, "px": px})
         entries = sorted({(p, n) for n, p in v.scale(kind)})
         below = [e for e in entries if e[0] <= abs(px)]
         above = [e for e in entries if e[0] >= abs(px)]
@@ -811,7 +903,7 @@ class _FileScan:
                          f"hand-written box-shadow is exactly {v.ref(hit)}", f"use {v.ref(hit)}", group=f"shadow → {hit}", scale="shadow"))
         elif v.has_scale("shadow"):
             self.add(_mk("off-scale-length", "info", self.filename, self.lines, off,
-                         f"hand-rolled box-shadow `{val}` — the DS ships elevation tokens ({', '.join(n for n, _ in v.shadows)})",
+                         f"hand-rolled box-shadow `{val}` — the DS ships elevation tokens ({', '.join(dict.fromkeys(n for n, _ in v.shadows))})",
                          "use the closest elevation token", group="shadow: hand-rolled", scale="shadow"))
         else:
             self.ctx.missing.setdefault("shadow", []).append({"file": self.filename, "line": self.lines.pos(off)[0], "value": val, "prop": "box-shadow", "px": None})
@@ -875,10 +967,15 @@ class _FileScan:
         return None
 
     def rule_controls(self) -> None:
-        for m in _CONTROL_RE.finditer(self.masked):
+        # In JS, a "<button>" inside a string literal is text, not markup: scan with string
+        # contents blanked. Templates (HTML/Vue/Svelte) have no JS strings to worry about.
+        scan = mask_strings(self.masked) if self.kind == "js" else self.masked
+        for m in _CONTROL_RE.finditer(scan):
             el = m.group(1)
             tag_end = self.masked.find(">", m.end())
             tag = self.masked[m.end(): tag_end if tag_end > 0 else m.end() + 200]
+            if re.search(r"""\bclass(Name)?\s*=\s*[{'"`]*[^>]*?(?<![\w-])""" + re.escape(self.class_prefix[1:]), tag):
+                continue  # styled with the DS's own kit class — on-system (the no-build path)
             if el == "input":
                 tm = re.search(r"""\btype\s*=\s*[{'"]*\s*['"]?([a-z]+)""", tag)
                 itype = tm.group(1) if tm else "text"
@@ -910,7 +1007,8 @@ class _FileScan:
                 off = m.start(1)
                 if local.lower() in by_lower:
                     ds = by_lower[local.lower()]
-                    if ds in imported:
+                    wraps_local = re.search(r"""(?:import\(\s*|\bfrom\s+)['"][^'"]*/""" + re.escape(local) + r"""['"]""", self.masked)
+                    if ds in imported or wraps_local:
                         self.add(_mk("shadow-component", "info", self.filename, self.lines, off,
                                      f"local {local} wraps the DS {ds} under the same name",
                                      f"fine if it only adds app wiring — but a same-named wrapper hides which {ds} a reader is looking at; consider a distinct name",
@@ -939,6 +1037,21 @@ class _FileScan:
                                  f"build it on the DS {ds} (a variant/prop), or propose the variant to the DS",
                                  group=f"*{ds} family", component=ds, local=local))
 
+    def rule_namespace_squat(self) -> None:
+        """App definitions of ``--pl-*`` names the DS doesn't ship. They silence unknown-token
+        for every reference (the app "defines" them), and the DS can ship the same name later
+        with a different meaning. Redefining a REAL token (theming) is not squatting."""
+        if self.vocab.source != "css":
+            return
+        for prop, val, vs, ve in self.decls:
+            if prop.startswith(self.prefix) and not self.vocab.is_known(prop):
+                close = self.vocab.close_names(prop)
+                self.add(_mk("namespace-squat", "warn", self.filename, self.lines, vs,
+                             f"{prop} is defined by the app inside the design system's {self.prefix}* namespace, but the DS doesn't ship it",
+                             (f"did you mean {', '.join(close)}? " if close else "")
+                             + "rename it into the app's own namespace (e.g. --app-…), or ask the DS for the token",
+                             group=prop))
+
     def rule_foreign_imports(self) -> None:
         for m in _IMPORT_RE.finditer(self.masked):
             spec = m.group(2)
@@ -956,11 +1069,13 @@ def _minified(text: str) -> bool:
     return len(text) > 2000 and len(text) / lines > 400
 
 
-def audit_text(text: str, filename: str, vocab, inventory=None, rules=None, ctx: AuditContext | None = None) -> list[dict]:
+def audit_text(text: str, filename: str, vocab, inventory=None, rules=None, ctx: AuditContext | None = None, loose: bool = False) -> list[dict]:
     """Audit one file's text → findings (consumer lane only; the ds-lane aggregates come from
     ``aggregate``/``finalize``). ``filename`` picks the language by extension (default CSS)
     and is echoed into each finding. ``rules``: iterable of rule ids to run (None = all).
-    Pass a shared ``ctx`` across files; one is made for you otherwise."""
+    Pass a shared ``ctx`` across files; one is made for you otherwise. ``loose=True`` is for
+    a pasted FRAGMENT of unknown shape: when the text has no CSS declarations at all, every
+    hex literal counts (not only ones in a color context)."""
     ctx = ctx or AuditContext(inventory=inventory, rules=rules)
     base = Path(filename or "").name.lower()
     if base.endswith("tokens.css"):
@@ -977,7 +1092,7 @@ def audit_text(text: str, filename: str, vocab, inventory=None, rules=None, ctx:
         ctx.collect_definitions(text, filename)
     ctx.files_scanned += 1
     ctx.lines_scanned += text.count("\n") + 1
-    findings = _FileScan(text, filename, vocab, ctx).run()
+    findings = _FileScan(text, filename, vocab, ctx, loose=loose).run()
     if per_line:
         findings = [f for f in findings if not (f["line"] in per_line and (per_line[f["line"]] is None or f["rule"] in per_line[f["line"]]))]
     return findings
@@ -995,7 +1110,7 @@ def aggregate(ctx: AuditContext, vocab) -> list[dict]:
             for o in occ:
                 values[o["value"]] = values.get(o["value"], 0) + 1
             top = sorted(values.items(), key=lambda kv: -kv[1])
-            have = vocab.scale(kind) if kind != "shadow" else [(n, 0) for n, _ in vocab.shadows]
+            have = vocab.scale(kind) if kind != "shadow" else [(n, 0) for n in dict.fromkeys(n for n, _ in vocab.shadows)]
             files = sorted({o["file"] for o in occ})
             out.append({
                 "rule": "missing-scale", "severity": "warn", "lane": "ds", "file": "", "line": 0, "col": 0, "snippet": "",
@@ -1007,6 +1122,30 @@ def aggregate(ctx: AuditContext, vocab) -> list[dict]:
                               + ", ".join(f"{v} ×{c}" for v, c in top[:8]) + "); then migrate consumers to it",
                 "count": len(occ), "values": dict(top), "files": files[:50],
                 "evidence": [{"file": o["file"], "line": o["line"], "snippet": f"{o['prop']}: {o['value']}"} for o in occ],
+            })
+    if "scale-gap" in ctx.rules:
+        for kind, occ in sorted(ctx.off_scale.items(), key=lambda kv: -len(kv[1])):
+            by_value: dict[str, list[dict]] = {}
+            for o in occ:
+                by_value.setdefault(f"{abs(o['px']):g}px", []).append(o)
+            recurring = sorted(((val, items) for val, items in by_value.items()
+                                if len(items) >= SCALE_GAP_MIN_USES or len({o["file"] for o in items}) >= SCALE_GAP_MIN_FILES),
+                               key=lambda kv: -len(kv[1]))
+            if not recurring:
+                continue
+            n = sum(len(items) for _, items in recurring)
+            steps = ", ".join(f"{n_}={px:g}px" for n_, px in vocab.scale(kind))
+            files = sorted({o["file"] for _, items in recurring for o in items})
+            out.append({
+                "rule": "scale-gap", "severity": "info", "lane": "ds", "file": "", "line": 0, "col": 0, "snippet": "",
+                "group": f"scale-gap: {kind}",
+                "message": (f"the {vocab_mod.SCALE_LABEL[kind]} scale ({steps}) has no step for values the app uses "
+                            f"over and over: " + ", ".join(f"{val} ×{len(items)}" for val, items in recurring[:8])
+                            + f" — {n} uses across {len(files)} files"),
+                "suggestion": "DS: decide per value — add the step (it's a real rhythm the product needs) or rule it "
+                              "out (then consumers snap to the nearest step); either way the consumer can't settle it alone",
+                "count": n, "values": {val: len(items) for val, items in recurring}, "files": files[:50],
+                "evidence": [{"file": o["file"], "line": o["line"], "snippet": f"{o['prop']}: {o['value']}"} for _, items in recurring for o in items[:5]],
             })
     if "palette-gap" in ctx.rules:
         for norm, occ in sorted(ctx.far_colors.items(), key=lambda kv: -len(kv[1])):
@@ -1038,15 +1177,30 @@ def aggregate(ctx: AuditContext, vocab) -> list[dict]:
     return out
 
 
+SCALE_GAP_MIN_USES = 10
+SCALE_GAP_MIN_FILES = 3
+
 SCORE_FORMULA = (
     "score = 100 × good / (good + penalty), where good = valid var(--pl-*) references + names "
-    "imported from the DS packages, and penalty = Σ consumer findings weighted error 3, warn 1, "
-    "info 0.25. DS-lane findings don't lower the score — they're the design system's to fix."
+    "imported from the DS packages, and penalty = Σ over consumer finding groups of "
+    "min(10, Σ weights) with error 3, warn 1, info 0.25 (off-scale info 0 — that's the DS's "
+    "scale-gap). DS-lane findings don't lower the score — they're the design system's to fix."
 )
 
 
+def _weight(f: dict) -> float:
+    if f.get("rule") == "off-scale-length" and f.get("severity") == "info":
+        return 0.0  # an off-scale value is a question for the DS scale (scale-gap), not a consumer defect
+    return SEVERITY_WEIGHT.get(f.get("severity", "warn"), 1.0)
+
+
 def score(findings: list[dict], ctx: AuditContext) -> int:
-    penalty = sum(SEVERITY_WEIGHT.get(f["severity"], 1.0) for f in findings if f.get("lane") == "consumer")
+    groups: dict[tuple, float] = {}
+    for f in findings:
+        if f.get("lane") == "consumer":
+            key = (f.get("rule"), f.get("group"))
+            groups[key] = groups.get(key, 0.0) + _weight(f)
+    penalty = sum(min(GROUP_WEIGHT_CAP, w) for w in groups.values())
     good = ctx.token_refs + ctx.ds_imports
     if good + penalty == 0:
         return 100
@@ -1094,6 +1248,28 @@ def _group(findings: list[dict]) -> dict[str, dict[str, list[dict]]]:
     return out
 
 
+def _fix_first(findings: list[dict], limit: int = 12, per_rule: int = 3) -> list[str]:
+    """The groups that are broken or forked, most urgent first — so 18 unknown tokens aren't
+    buried under a thousand spacing nits."""
+    urgent = {"unknown-token": ("error",), "stale-fallback": ("warn",), "ds-class-override": ("warn",),
+              "legacy-alias": ("warn",), "namespace-squat": ("warn",), "foreign-ui-lib": ("warn",),
+              "shadow-component": ("warn",), "raw-color": ("warn",)}
+    grouped = _group([f for f in findings if f.get("lane") == "consumer" and f["severity"] in urgent.get(f["rule"], ())])
+    out = []
+    for rule in CONSUMER_PRIORITY:
+        groups = sorted(grouped.get(rule, {}).items(), key=lambda kv: -len(kv[1]))
+        for key, items in groups[:per_rule]:
+            first = items[0]
+            where = ", ".join(f"`{f['file']}:{f['line']}`" for f in items[:3]) + (f" +{len(items) - 3}" if len(items) > 3 else "")
+            out.append(f"- **{first['severity']}** `{rule}` **{key}** ×{len(items)} — {first['message']} ({where})")
+            if len(out) >= limit:
+                return out
+        if len(groups) > per_rule:
+            rest = sum(len(g) for _, g in groups[per_rule:])
+            out.append(f"  - +{len(groups) - per_rule} more `{rule}` group(s), {rest} finding(s) — below")
+    return out
+
+
 def render_markdown(findings: list[dict], summary: dict, title: str = "Design-system audit", per_group: int = 5, groups_per_rule: int = 12, vocab=None) -> str:
     """Human/agent report: DS lane first (what the design system must fix), then the consumer
     lane, each rule grouped by theme with file:line evidence, capped with "+N more"."""
@@ -1107,18 +1283,25 @@ def render_markdown(findings: list[dict], summary: dict, title: str = "Design-sy
     if vocab is not None and vocab.missing_scales():
         L.append("")
         L.append("DS has no token scale for: " + ", ".join(vocab_mod.SCALE_LABEL[k] for k in vocab.missing_scales()) + ".")
+    fix_first = _fix_first(findings)
+    if fix_first:
+        L += ["", "## Fix first"]
+        L += fix_first
     L.append("")
     L.append("| rule | lane | count |")
     L.append("|---|---|---|")
-    for rule, n in s["by_rule"].items():
-        L.append(f"| `{rule}` | {RULES.get(rule, {}).get('lane', '?')} | {n} |")
+    # Priority order, not count order: a thousand spacing nits mustn't sit above 18 broken tokens.
+    order = [r for r in CONSUMER_PRIORITY if r in s["by_rule"]] + [r for r in s["by_rule"] if r not in CONSUMER_PRIORITY]
+    for rule in order:
+        L.append(f"| `{rule}` | {RULES.get(rule, {}).get('lane', '?')} | {s['by_rule'][rule]} |")
     if s["top_files"]:
         L.append("")
         L.append("Top offending files: " + ", ".join(f"`{p}` ({n})" for p, n in s["top_files"][:8]))
     grouped = _group(findings)
     for lane, heading in (("ds", "Design-system lane — gaps the DS should fix (file in the DS repo)"),
                           ("consumer", "Consumer lane — violations this codebase should fix")):
-        rules = [r for r in RULES if RULES[r]["lane"] == lane and r in grouped]
+        order = list(CONSUMER_PRIORITY) + [r for r in RULES if r not in CONSUMER_PRIORITY]
+        rules = [r for r in order if RULES[r]["lane"] == lane and r in grouped]
         if not rules:
             continue
         L += ["", f"## {heading}"]
@@ -1172,9 +1355,13 @@ def _split_globs(globs) -> list[str]:
     return [g.strip() for g in globs if g and g.strip()]
 
 
-def walk(root, include_globs=None, exclude_globs=None, max_files: int = 5000) -> tuple[list[Path], bool]:
+def walk(root, include_globs=None, exclude_globs=None, max_files: int = 5000, skipped: list | None = None) -> tuple[list[Path], bool]:
     """Auditable files under ``root`` (sorted), and whether ``max_files`` truncated the list.
-    Globs match the POSIX path relative to ``root`` with fnmatch (``*`` crosses ``/``)."""
+    Globs match the POSIX path relative to ``root`` with fnmatch (``*`` crosses ``/``).
+
+    Only REGULAR files are returned: symlinks (which could point outside ``root`` — at a
+    secret, a FIFO, /dev/zero) and every other special file are skipped, with the reason
+    appended to ``skipped`` when given. Directory symlinks are never descended into."""
     root = Path(root)
     inc = _split_globs(include_globs)
     exc = list(DEFAULT_EXCLUDE_GLOBS) + _split_globs(exclude_globs)
@@ -1194,6 +1381,16 @@ def walk(root, include_globs=None, exclude_globs=None, max_files: int = 5000) ->
                 continue
             if inc and not any(fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(fn, g) for g in inc):
                 continue
+            try:
+                st = os.lstat(os.path.join(dirpath, fn))
+            except OSError as e:
+                if skipped is not None:
+                    skipped.append(f"{rel}: {e.strerror or e}")
+                continue
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                if skipped is not None:
+                    skipped.append(f"{rel}: {'symlink' if stat.S_ISLNK(st.st_mode) else 'not a regular file'} — not followed")
+                continue
             if len(files) >= max_files:
                 truncated = True
                 break
@@ -1203,30 +1400,69 @@ def walk(root, include_globs=None, exclude_globs=None, max_files: int = 5000) ->
     return files, truncated
 
 
-def audit_tree(root, vocab, inventory=None, include_globs=None, exclude_globs=None, max_files: int = 5000, rules=None, ds_packages=DS_PACKAGES) -> dict:
+def read_bounded(path, limit: int = MAX_FILE_BYTES) -> str | None:
+    """A regular file's text, or ``None`` when it is larger than ``limit``. Never follows a
+    symlink (O_NOFOLLOW), never blocks on a FIFO (O_NONBLOCK + an fstat S_ISREG check), and
+    never trusts ``st_size`` (/dev/zero reports 0): it reads at most ``limit + 1`` bytes.
+    Raises ``OSError`` for anything that isn't a readable regular file."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(str(path), flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path}: not a regular file")
+        chunks, total = [], 0
+        while total <= limit:
+            chunk = os.read(fd, min(1 << 16, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    finally:
+        os.close(fd)
+    if total > limit:
+        return None
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def audit_tree(root, vocab, inventory=None, include_globs=None, exclude_globs=None, max_files: int = 5000, rules=None, ds_packages=DS_PACKAGES, time_budget: float = DEFAULT_TIME_BUDGET) -> dict:
     """Audit every source file under ``root``. Two passes: first every custom property the
     app defines (so its own vars aren't "unknown" and aliases are judged tree-wide), then the
-    rules. Returns ``{root, findings, summary, truncated}`` — findings include the ds lane."""
+    rules. Returns ``{root, findings, summary, truncated}`` — findings include the ds lane.
+    ``time_budget`` (seconds) bounds the whole audit: past it, remaining files are skipped,
+    ``truncated`` is set and ``summary["timed_out"]`` says so."""
+    import time
+
     root = Path(root)
-    files, truncated = walk(root, include_globs, exclude_globs, max_files)
     ctx = AuditContext(inventory=inventory, rules=rules, ds_packages=ds_packages)
+    files, truncated = walk(root, include_globs, exclude_globs, max_files, skipped=ctx.skipped)
+    deadline = time.monotonic() + max(0.0, float(time_budget or 0)) if time_budget else None
+    timed_out = False
     texts: list[tuple[str, str]] = []
     for p in files:
-        try:
-            if p.stat().st_size > MAX_FILE_BYTES:
-                ctx.skipped.append(f"{p.relative_to(root).as_posix()}: larger than {MAX_FILE_BYTES} bytes")
-                continue
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError as e:
-            ctx.skipped.append(f"{p}: {e}")
-            continue
         rel = p.relative_to(root).as_posix()
+        if deadline is not None and time.monotonic() > deadline:
+            timed_out = True
+            break
+        try:
+            text = read_bounded(p)
+        except OSError as e:
+            ctx.skipped.append(f"{rel}: {e.strerror or e}")
+            continue
+        if text is None:
+            ctx.skipped.append(f"{rel}: larger than {MAX_FILE_BYTES} bytes")
+            continue
         texts.append((rel, text))
         ctx.collect_definitions(text, rel)
     findings: list[dict] = []
-    for rel, text in texts:
+    for i, (rel, text) in enumerate(texts):
+        if deadline is not None and time.monotonic() > deadline:
+            timed_out = True
+            ctx.skipped.append(f"time budget of {time_budget:g}s reached — {len(texts) - i} read file(s) not audited")
+            break
         findings.extend(audit_text(text, rel, vocab, ctx=ctx))
     allf, summary = finalize(findings, ctx, vocab)
+    truncated = truncated or timed_out
     summary["truncated"] = truncated
+    summary["timed_out"] = timed_out
     summary["max_files"] = max_files
     return {"root": str(root), "findings": allf, "summary": summary, "truncated": truncated}

@@ -10,7 +10,7 @@ adherence score plus findings split into two **lanes**. The lane decides where a
 read it before anything else:
 
 - **`ds` lane** — the design system is missing something the app needed: no type scale
-  (`missing-scale`), a color the app keeps reaching for with no token near it (`palette-gap`),
+  (`missing-scale`), a scale step the app uses over and over (`scale-gap`: `gap: 6px` ×141), a color the app keeps reaching for with no token near it (`palette-gap`),
   a DS class everyone overrides because the component lacks a variant (`override-hotspot`).
   These are filed on the **design-system repo**. The consumer can't fix them properly.
 - **`consumer` lane** — the audited app is off-system: raw colors, stale `var()` fallbacks,
@@ -37,6 +37,9 @@ chasing one theme (`rules="stale-fallback,unknown-token"`). The reply is a summa
 are at the bottom of the reply.
 
 ## 3. Triage by lane, then by theme
+
+The report opens with **Fix first** — broken tokens, stale fallbacks, forks — in priority
+order. Start there; the long tail of spacing values is the DS's `scale-gap`, not a to-do list.
 
 Findings arrive **grouped by theme**: one token, one DS class, one literal, with a count and
 file:line evidence. Work in groups, never line by line:
