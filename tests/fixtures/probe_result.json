@@ -1,0 +1,15 @@
+{"v":1,"url":"https://acme.example/","title":"Acme","themeColorMeta":"#e11d48","colorScheme":"normal",
+ "bodyBg":"rgb(255, 255, 255)","bodyFg":"rgb(24, 24, 27)",
+ "colors":[
+  {"value":"rgb(255, 255, 255)","prop":"background","area":1400000,"count":40},
+  {"value":"rgb(24, 24, 27)","prop":"color","area":220000,"count":180},
+  {"value":"rgb(225, 29, 72)","prop":"button","area":18000,"count":6},
+  {"value":"rgb(225, 29, 72)","prop":"link","area":4000,"count":22},
+  {"value":"rgb(244, 244, 245)","prop":"background","area":300000,"count":12},
+  {"value":"rgb(37, 99, 235)","prop":"fill","area":900,"count":2},
+  {"value":"rgba(0, 0, 0, 0)","prop":"background","area":999999,"count":99},
+  {"value":"rgb(228, 228, 231)","prop":"border","area":30000,"count":60}
+ ],
+ "customProps":{"--acme-primary":"#e11d48","--acme-surface":"#f4f4f5","--acme-font":"\"Manrope\", sans-serif"},
+ "fonts":[{"family":"Manrope, sans-serif","area":200000,"count":150}],
+ "radii":[{"value":"8px","count":30},{"value":"9999px","count":4}]}

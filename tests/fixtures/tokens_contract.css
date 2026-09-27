@@ -1,0 +1,135 @@
+/* Trimmed copy of protoContent packages/design-system/dist/tokens.css (the 4-block shape, every
+ * color role, chart series 1-4 only) — a representative contract for themegen tests. */
+:root {
+  color-scheme: dark;
+  --pl-color-brand-lavender: #9b87f2;
+  --pl-color-brand-lavender-light: #b8a6f5;
+  --pl-color-brand-lavender-deep: #5b3fc9;
+  --pl-color-brand-indigo: #6366f1;
+  --pl-color-brand-indigo-bright: #818cf8;
+  --pl-color-brand-indigo-deep: #4f46e5;
+  --pl-color-bg: #0a0a0c;
+  --pl-color-bg-raised: #131316;
+  --pl-color-bg-subtle: #1c1c22;
+  --pl-color-bg-hover: #19191d;
+  --pl-color-bg-inset: #060608;
+  --pl-color-overlay: rgba(0, 0, 0, 0.6);
+  --pl-color-fg: #ededed;
+  --pl-color-fg-muted: #a1a1aa;
+  --pl-color-fg-subtle: #71717a;
+  --pl-color-fg-on-accent: #0a0a0c;
+  --pl-color-border: rgba(255, 255, 255, 0.08);
+  --pl-color-border-strong: rgba(255, 255, 255, 0.18);
+  --pl-color-accent: #9b87f2;
+  --pl-color-accent-hover: #b8a6f5;
+  --pl-color-accent-fg: #b8a6f5;
+  --pl-color-focus: #9b87f2;
+  --pl-color-status-success: oklch(0.72 0.13 145);
+  --pl-color-status-warning: oklch(0.78 0.12 75);
+  --pl-color-status-error: oklch(0.64 0.16 25);
+  --pl-color-status-info: oklch(0.68 0.12 230);
+  --pl-color-chart-series1: oklch(0.72 0.14 290);
+  --pl-color-chart-series2: oklch(0.70 0.12 250);
+  --pl-color-chart-series3: oklch(0.72 0.13 170);
+  --pl-color-chart-series4: oklch(0.74 0.14 135);
+  --pl-color-chart-grid: rgba(255, 255, 255, 0.06);
+  --pl-color-chart-axis: #a1a1aa;
+  --pl-font-sans: "Geist", system-ui, -apple-system, sans-serif;
+  --pl-radius: 4px;
+}
+
+/* Light mode — the user's OS preference drives it, on every surface: apps and
+ * marketing alike. The explicit [data-theme] force below beats this block on
+ * specificity, and is for surfaces that ship a theme picker (see applyMode in
+ * @protolabsai/ui theming.tsx). Marketing does NOT force a theme. */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --pl-color-bg: #f6f7f9;
+    --pl-color-bg-raised: #ffffff;
+    --pl-color-bg-subtle: #eceef2;
+    --pl-color-bg-hover: #e4e7ec;
+    --pl-color-bg-inset: #eef0f4;
+    --pl-color-overlay: rgba(20, 20, 30, 0.35);
+    --pl-color-fg: #18181b;
+    --pl-color-fg-muted: #52525b;
+    --pl-color-fg-subtle: #8a8a94;
+    --pl-color-fg-on-accent: #ffffff;
+    --pl-color-border: rgba(0, 0, 0, 0.10);
+    --pl-color-border-strong: rgba(0, 0, 0, 0.20);
+    --pl-color-accent: #6366f1;
+    --pl-color-accent-hover: #4f46e5;
+    --pl-color-accent-fg: #4f46e5;
+    --pl-color-focus: #6366f1;
+    --pl-color-status-success: oklch(0.62 0.15 150);
+    --pl-color-status-warning: oklch(0.74 0.16 92);
+    --pl-color-status-error: oklch(0.58 0.20 25);
+    --pl-color-status-info: oklch(0.58 0.17 255);
+    --pl-color-chart-series1: oklch(0.52 0.16 290);
+    --pl-color-chart-series2: oklch(0.50 0.14 250);
+    --pl-color-chart-series3: oklch(0.52 0.15 170);
+    --pl-color-chart-series4: oklch(0.54 0.16 135);
+    --pl-color-chart-grid: rgba(0, 0, 0, 0.06);
+    --pl-color-chart-axis: #52525b;
+  }
+}
+
+/* Explicit theme force — wins over the OS preference above. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --pl-color-bg: #f6f7f9;
+  --pl-color-bg-raised: #ffffff;
+  --pl-color-bg-subtle: #eceef2;
+  --pl-color-bg-hover: #e4e7ec;
+  --pl-color-bg-inset: #eef0f4;
+  --pl-color-overlay: rgba(20, 20, 30, 0.35);
+  --pl-color-fg: #18181b;
+  --pl-color-fg-muted: #52525b;
+  --pl-color-fg-subtle: #8a8a94;
+  --pl-color-fg-on-accent: #ffffff;
+  --pl-color-border: rgba(0, 0, 0, 0.10);
+  --pl-color-border-strong: rgba(0, 0, 0, 0.20);
+  --pl-color-accent: #6366f1;
+  --pl-color-accent-hover: #4f46e5;
+  --pl-color-accent-fg: #4f46e5;
+  --pl-color-focus: #6366f1;
+  --pl-color-status-success: oklch(0.62 0.15 150);
+  --pl-color-status-warning: oklch(0.74 0.16 92);
+  --pl-color-status-error: oklch(0.58 0.20 25);
+  --pl-color-status-info: oklch(0.58 0.17 255);
+  --pl-color-chart-series1: oklch(0.52 0.16 290);
+  --pl-color-chart-series2: oklch(0.50 0.14 250);
+  --pl-color-chart-series3: oklch(0.52 0.15 170);
+  --pl-color-chart-series4: oklch(0.54 0.16 135);
+  --pl-color-chart-grid: rgba(0, 0, 0, 0.06);
+  --pl-color-chart-axis: #52525b;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --pl-color-bg: #0a0a0c;
+  --pl-color-bg-raised: #131316;
+  --pl-color-bg-subtle: #1c1c22;
+  --pl-color-bg-hover: #19191d;
+  --pl-color-bg-inset: #060608;
+  --pl-color-overlay: rgba(0, 0, 0, 0.6);
+  --pl-color-fg: #ededed;
+  --pl-color-fg-muted: #a1a1aa;
+  --pl-color-fg-subtle: #71717a;
+  --pl-color-fg-on-accent: #0a0a0c;
+  --pl-color-border: rgba(255, 255, 255, 0.08);
+  --pl-color-border-strong: rgba(255, 255, 255, 0.18);
+  --pl-color-accent: #9b87f2;
+  --pl-color-accent-hover: #b8a6f5;
+  --pl-color-accent-fg: #b8a6f5;
+  --pl-color-focus: #9b87f2;
+  --pl-color-status-success: oklch(0.72 0.13 145);
+  --pl-color-status-warning: oklch(0.78 0.12 75);
+  --pl-color-status-error: oklch(0.64 0.16 25);
+  --pl-color-status-info: oklch(0.68 0.12 230);
+  --pl-color-chart-series1: oklch(0.72 0.14 290);
+  --pl-color-chart-series2: oklch(0.70 0.12 250);
+  --pl-color-chart-series3: oklch(0.72 0.13 170);
+  --pl-color-chart-series4: oklch(0.74 0.14 135);
+  --pl-color-chart-grid: rgba(255, 255, 255, 0.06);
+  --pl-color-chart-axis: #a1a1aa;
+}

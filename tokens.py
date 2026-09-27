@@ -83,7 +83,7 @@ def _blocks(css: str) -> list[tuple[str, dict[str, str]]]:
     return out
 
 
-def parse_css(css: str) -> dict[str, dict[str, str]]:
+def parse_css(css: str, scope: str = "") -> dict[str, dict[str, str]]:
     """Split ``tokens.css`` into ``{"dark": {var: value}, "light": {var: value}}``.
 
     Resolved STRUCTURALLY, never by source order. The naive read — walk every ``:root``
@@ -92,6 +92,9 @@ def parse_css(css: str) -> dict[str, dict[str, str]]:
     into the dark set and only looks correct while a later ``[data-theme="dark"]`` block
     happens to overwrite them again. Reorder the DS's output and dark silently becomes
     light. So the media wrapper is lifted out by name before anything else is read.
+
+    ``scope`` also reads a white-label override sheet written under another selector (e.g.
+    ``[data-brand="acme"]``): a block whose selector is exactly that scope counts as the base.
 
     The bare ``:root`` block carries the FULL token set (the DS ships dark as its base);
     themed blocks carry only deltas, so each theme is the base overlaid with its own
@@ -112,7 +115,7 @@ def parse_css(css: str) -> dict[str, dict[str, str]]:
             light_over.update(decls)
         elif 'data-theme="dark"' in sel:
             dark_over.update(decls)
-        elif sel.endswith(":root"):
+        elif sel.endswith(":root") or (scope and sel == " ".join(scope.split())):
             base.update(decls)
     return {
         "dark": {**base, **dark_over},

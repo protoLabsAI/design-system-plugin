@@ -29,6 +29,51 @@ from the repo at call time** — the anti-drift principle, as tools.
 | `ds_check <code> [filename]` | lints a snippet with the audit engine (every rule below) → the token / component to use instead, with ΔE for near-miss colors |
 | `ds_audit_repo <path> [include] [exclude] [rules] [max_findings]` | audits a **local checkout** (or an onboarded `owner/repo`) for design-system adherence → a 0-100 score and a report split into **DS gaps** vs **consumer fixes**, written as `.md` + `.json` to the plugin data dir |
 | `ds_drift` | what changed since the last check (tokens + components); updates a snapshot |
+| `theme_scale` / `theme_contrast` / `theme_palette` / `theme_apply` | the LCH theme-designer engine: an 11-step scale, a WCAG check, a harmony palette, and persisting `{mode, overrides}` as this console's theme |
+| `theme_extract <source>` | brand signals from a **URL** (static HTML + same-site/CDN stylesheets, no JS), raw **CSS**, a rendered **probe JSON**, or a **hex list** → ranked brand candidates with evidence, ground/text, fonts, radius, and suggested seeds with a confidence |
+| `theme_probe_script` | the in-page probe (`PROBE_JS`) — run it with `browser_eval` on a JS-rendered site and pass its JSON to `theme_extract` |
+| `theme_generate <primary> [secondary] [neutral] [name] [scope] [font_family] [radius]` | a full **dark + light** theme for every `--pl-color-*` the LIVE `tokens.css` defines, AA-checked and repaired. Returns a compact preview to hand `show_artifact` verbatim, ready `theme_apply` maps, and the URL of the full preview (`/plugins/design-system/themes/<name>/preview`); writes `<name>.theme.css` (the DS's 4-block shape, scope-able for white-label), `<name>.theme.json` and `<name>.preview.html` to the plugin's instance data dir |
+
+## Theming from a brand
+
+`theme_extract` → `theme_generate` → `show_artifact` the preview → iterate → deliver. Pure logic
+lives in `themegen.py` (stdlib + the in-repo `colorcore`; no new dependencies — the frozen desktop
+host can't install wheels).
+
+- **The var list is never hardcoded.** `theme_generate` reads the live `tokens.css` and covers
+  every `--pl-color-*` it defines. Each var's role comes from its NAME (a role table: ground,
+  surface, text tiers, on-accent, accent + states, focus, status, chart series, lines, scrims,
+  brand marks) and its lightness structure from the DS's OWN default in each theme — so the
+  elevation relation (dark: raised lighter than the ground; light: raised is the lightest) and the
+  text tiers carry over by construction. A var the table doesn't know keeps its hue relation to the
+  default accent, rotated onto the brand.
+- **Accent per theme.** The brand if it clears 3:1 on the ground, takes an AA on-accent and sits
+  in the DS's lightness band for that theme; otherwise the nearest `theme.scale` step that does
+  (pure yellow → a deep olive on light), preferring the DS's own on-accent polarity.
+- **Contrast is a gate, not a report.** Text 4.5:1, tertiary text / accent / focus / status /
+  chart series 3:1, against every surface. A failing pair is repaired by nudging LCH lightness and
+  every repair is listed (before → after → why). Borders are decorative and not gated. Status
+  colors default to 3:1 because the DS intends them as hue marks; `generate(strict_status=True)`
+  holds them to 4.5:1.
+- **Output.** `<name>.theme.css` mirrors the DS's own build: `:root` (dark default) →
+  `@media (prefers-color-scheme: light)` → `:root[data-theme="light"]` → `:root[data-theme="dark"]`,
+  themed blocks carrying only what differs. Pass `scope='[data-brand="acme"]'` for a white-label
+  scope. `<name>.theme.json`'s `dark`/`light` maps are `theme_apply`-ready. `<name>.preview.html`
+  shows both themes side by side using the kit's `.pl-*` classes (zero-specificity fallbacks, so it
+  is fully styled without the kit) plus the contrast table.
+- **Fetching is hardened** (`fetch.py`, shared by any tool that fetches an operator-supplied URL):
+  only globally-routable addresses (an allowlist: loopback, RFC1918, link-local, CGNAT/Tailscale
+  `100.64/10`, ULA and v4-in-v6 forms are refused); the connection is pinned to the vetted IP
+  (TLS still verifies the hostname), so DNS rebinding gets nothing; every redirect is re-vetted;
+  one wall-clock deadline bounds the whole extract; decompressed bytes are capped as they stream.
+- **Confidence is earned.** `high` needs a real score, at least two INDEPENDENT kinds of evidence
+  (custom property, button fill, theme-color meta, links) and a 2× margin over the runner-up; a
+  URL read that got no stylesheet is capped at `low`. Status/text-named props
+  (`--brand-color-danger-fg`) never count as brand, and the page's ground and body-text colors
+  are removed from the brand candidates.
+- **Rendered sites.** A static read can't see CSS-in-JS or runtime themes. `theme_probe_script`
+  returns a self-contained expression that samples visible elements' computed colors weighted by
+  rendered area; run it with `browser_eval` and hand the JSON to `theme_extract`.
 
 ## Auditing a repo — `ds_audit_repo`
 
@@ -182,6 +227,9 @@ into a real `packages/ui` PR.
 
 `skills/auditing-a-repo/SKILL.md` carries the audit workflow (onboard → `ds_audit_repo` →
 triage by lane → verify → file grouped issues, DS gaps in the established gap format).
+
+`skills/theming-from-a-brand/SKILL.md` carries the brand → theme workflow (extract → confirm
+seeds → generate → preview → iterate → deliver).
 
 `skills/using-the-design-system/SKILL.md` auto-loads and carries the agent-facing contract:
 *never name a component, variant, prop or token you have not read from a tool this turn*; search
