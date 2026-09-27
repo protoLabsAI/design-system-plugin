@@ -28,6 +28,9 @@ from the repo at call time** — the anti-drift principle, as tools.
 | `ds_kit_classes` | the `.pl-*` classes the DS's published kit stylesheet actually defines — the vocabulary a no-build prototype can use |
 | `ds_check <code> [filename]` | lints a snippet with the audit engine (every rule below) → the token / component to use instead, with ΔE for near-miss colors |
 | `ds_audit_repo <path> [include] [exclude] [rules] [max_findings]` | audits a **local checkout** (or an onboarded `owner/repo`) for design-system adherence → a 0-100 score and a report split into **DS gaps** vs **consumer fixes**, written as `.md` + `.json` to the plugin data dir |
+| `ds_site_probe_script [script_only]` | the in-page **probe** the agent runs with `browser_eval` on a live site (`browser_open` first) — returns ≤ 30 KB of JSON: computed style usage, text/ground pairs, `:root` vars, DS class usage, landmarks, forms and the page's **repeated UI patterns** |
+| `ds_audit_url <url_or_probe> [rules]` | audits a **live site** — from the probe (rendered truth: colors → nearest token by ΔE, type/radius/spacing/shadow vs the scales, `--pl-*` adoption + token drift, WCAG contrast, unnamed controls) or, as a **static** fallback, from a URL (HTML + stylesheets through the CSS rules) → the same score / lanes / report as `ds_audit_repo` |
+| `ds_component_gaps <probe>` | breaks a probed site into repeated patterns and classifies each **COVERED / VARIANT GAP / MISSING / UNCLASSIFIED** against the DS inventory — proposed name + props API, priority, and ready-to-file gap issues |
 | `ds_drift` | what changed since the last check (tokens + components); updates a snapshot |
 | `theme_scale` / `theme_contrast` / `theme_palette` / `theme_apply` | the LCH theme-designer engine: an 11-step scale, a WCAG check, a harmony palette, and persisting `{mode, overrides}` as this console's theme |
 | `theme_extract <source>` | brand signals from a **URL** (static HTML + same-site/CDN stylesheets, no JS), raw **CSS**, a rendered **probe JSON**, or a **hex list** → ranked brand candidates with evidence, ground/text, fonts, radius, and suggested seeds with a confidence |
@@ -139,6 +142,81 @@ deliberate line with a `ds-audit-ignore` comment (optionally `ds-audit-ignore ra
 The workflow — onboard → audit → triage by lane → verify → file grouped issues — is the
 `auditing-a-repo` skill.
 
+## Auditing a live site — `ds_site_probe_script` → `ds_audit_url` / `ds_component_gaps`
+
+A repo audit reads what the code *says*; a site audit reads what the browser *renders*. This
+plugin never drives a browser (plugins don't import each other): the **agent** composes core's
+agent_browser tools with ours —
+
+```
+browser_open(url) → browser_eval(<ds_site_probe_script>) → ds_audit_url(<probe>) + ds_component_gaps(<probe>)
+```
+
+- **`siteprobe_js.py`** — `SITE_PROBE_SOURCE` (readable) and `SITE_PROBE_JS`, its minified build
+  (`python scripts/build_probe.py <esbuild>` regenerates it; a test fails when the recorded source
+  hash is stale). The minified form ships because `browser_eval` passes the script on the
+  `agent-browser` command line and Windows caps a whole command line at 32,767 characters: the
+  script stays ≤ 24 KiB quoted, leaving ≥ 6,000 characters for the exe path and runtime flags
+  (tested). One self-contained expression; it walks ≤ 5,000
+  visible elements (≤ 3.5 s), and returns a JSON string hard-capped at 30 KB (it trims itself in
+  stages and says what it trimmed): computed colors per property with counts, rendered-area
+  weight and example selectors; font families/sizes/weights/line-heights; radii; padding/margin/
+  gap; shadows; z-indices; transitions; text-vs-effective-background pairs (the worst-contrast
+  ones kept even when small); `:root` custom properties (`--pl-*` first); `.pl-*` class counts;
+  landmarks; forms and their controls; and up to 40 **clusters** — visible elements grouped by a
+  structural signature (inferred kind + tag + role + normalized class stems — utility classes,
+  CSS-module hashes and state classes stripped — + child shape), each with a count, a trimmed
+  whitelisted-attribute `outerHTML` (≤ 600 chars), size stats, observed states (`aria-*`,
+  `disabled`, `data-state`), variant features (backgrounds, heights, font sizes, radii, BEM
+  modifiers) and the accessible name.
+- **`siteprobe.py`** — the pure analyzer. The probe runs in the PAGE's realm, so its output is
+  untrusted: `parse_probe` rebuilds every probe from a fixed schema (typed containers, finite
+  numbers within ranges, length-capped strings, known kinds, ≤ 10 pages, ≤ 60 clusters/page,
+  1.5 MB input) and relays a `browser_eval` error instead of guessing. Every report and issue
+  draft quotes page content inertly — `@mentions`, `#123` refs and closing keywords are
+  neutralized, links/HTML escaped, fences longer than any backtick run inside them, and evidence
+  sits under an "untrusted page content" note. Then: `audit_probe` (findings in `audit.py`'s shape, rendered
+  through the same `render_markdown`), `component_gaps` (kind → DS component table, variant checks
+  against the DS's published Storybook story names, proposed APIs from the observed variation,
+  priority = frequency × prominence), `merge_probes` (several pages → one), and `static_audit`.
+- **`fetch.py`** — the ONE guarded fetcher (shared with `theme_extract`):
+  `fetch_text(url, *, max_bytes, deadline, allow_offsite_hosts=True)` with an ABSOLUTE
+  `time.monotonic()` deadline. `is_global` addresses only after unwrapping v4-in-v6 forms
+  (mapped, compatible, 6to4, Teredo, NAT64) — no loopback, RFC 1918, link-local or
+  CGNAT/Tailscale `100.64/10`; the socket **pinned** to the address that was checked (no
+  DNS-rebinding window; TLS still verifies the host name); every redirect re-checked, https→http
+  refused; a watchdog that shuts the socket at the deadline, so a byte-drip in the TLS handshake,
+  status line, headers, chunk sizes or body can't outlive it; a cap on the *decompressed* body
+  (gzip incl. multi-member, zlib and raw deflate); and nothing but `FetchError` escapes.
+
+URL-mode rules: `no-ds-adoption`, `token-value-drift`, `unknown-token`, `off-token-color`,
+`off-scale-length`, `low-contrast`, `unnamed-control`, `non-semantic-control`, and the ds-lane
+`missing-scale` / `palette-gap`. Static mode runs the repo rules over the fetched CSS; on a site
+that doesn't reference the DS's custom properties it skips `legacy-alias`, `ds-class-override`
+and the DS-lane aggregates (a shared `.pl-` prefix — GitHub's Primer `.pl-c1` — is not adoption).
+
+**The preferred path is one `execute_code` script** — the ~24 KB probe script and its ≤ 30 KB result
+never pass through the model's context:
+
+```python
+js = tools.ds_site_probe_script(script_only=True)
+probes = []
+for u in urls:
+    tools.browser_open(url=u)
+    probes.append(tools.browser_eval(expression=js))
+import json; p = json.dumps(probes)
+print(tools.ds_audit_url(url_or_probe=p)[:2500]); print(tools.ds_component_gaps(probe=p)[:3500])
+```
+
+`execute_code` ships disabled and its default bridge allowlist is read-only core tools, so the
+operator enables it and adds `browser_open, browser_eval, ds_site_probe_script, ds_audit_url,
+ds_component_gaps` to its `tools` setting. Without it the agent calls the tools one by one,
+passing the probe script to `browser_eval` and its result to ours verbatim (~10 K tokens each way).
+
+The workflow — probe 3-5 representative pages → audit → decompose → screenshot and verify →
+report with `show_artifact` → file deduplicated gap issues → hand implementation to the
+`protoEngineer` delegate — is the `auditing-a-site` skill.
+
 ## The explorer — a browse surface, and only that
 
 The plugin serves one console view (**Design System** in the right rail, also reachable from
@@ -231,6 +309,9 @@ triage by lane → verify → file grouped issues, DS gaps in the established ga
 `skills/theming-from-a-brand/SKILL.md` carries the brand → theme workflow (extract → confirm
 seeds → generate → preview → iterate → deliver).
 
+`skills/auditing-a-site/SKILL.md` carries the live-site workflow (probe in the browser →
+`ds_audit_url` → `ds_component_gaps` → verify by screenshot → report → file gaps → hand off).
+
 `skills/using-the-design-system/SKILL.md` auto-loads and carries the agent-facing contract:
 *never name a component, variant, prop or token you have not read from a tool this turn*; search
 before you build; say the system doesn't cover something rather than inventing a token; render
@@ -261,6 +342,8 @@ operator_mcp_tools:
   - ds_rules         # the visual-identity rules
   - ds_check         # lint a snippet against the tokens
   - ds_audit_repo    # audit a local checkout (reads only under the allowed roots)
+  - ds_audit_url     # audit a site (a probe JSON, or a static fetch of a public URL)
+  - ds_component_gaps  # decompose a probed site into covered / variant-gap / missing components
 ```
 
 The allowlist is **deny-by-default**, so a foreign client gets only what you name (`"*"` exposes

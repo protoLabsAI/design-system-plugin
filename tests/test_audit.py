@@ -526,7 +526,7 @@ def test_ds_audit_repo_is_registered_and_documented():
     for step in ("onboard_project", "ds_audit_repo", "## Gap", "## Evidence", "## Proposed API", "## Priority", "## Context"):
         assert step in skill, step
     src = (ROOT / "__init__.py").read_text()
-    assert "ds_audit_repo," in src.split("registry.register_tools(")[1].split(")")[0]
+    assert "ds_audit_repo," in src.split("def register(")[1].split("registry.register_tools(")[0]
 
 
 # ── adversarial-review regressions ────────────────────────────────────────────

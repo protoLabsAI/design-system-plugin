@@ -63,3 +63,11 @@ Shipping is a **pull request**, and a human merges it. Prototype → critique �
 `ds_drift` reports what changed since the last check and broadcasts `design-system.drift-detected`.
 When tokens move or components come and go, the docs and consuming surfaces need reconciling —
 that is a PR or a finding, not a shrug.
+
+## Related skills
+
+- **auditing-a-repo** — audit a local checkout for design-system adherence (`ds_audit_repo`),
+  triage by lane, file grouped issues.
+- **auditing-a-site** — audit a live website: probe the rendered page in the browser
+  (`ds_site_probe_script` + `browser_eval`), `ds_audit_url` for adherence, `ds_component_gaps`
+  to find the components the DS is missing, then report and file gaps.
