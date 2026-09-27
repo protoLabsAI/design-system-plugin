@@ -71,3 +71,6 @@ that is a PR or a finding, not a shrug.
 - **auditing-a-site** — audit a live website: probe the rendered page in the browser
   (`ds_site_probe_script` + `browser_eval`), `ds_audit_url` for adherence, `ds_component_gaps`
   to find the components the DS is missing, then report and file gaps.
+- **delegating-across-boards** — when work crosses the DS board and protoEngineer's board:
+  who owns which repo, the brief template, gating the cross-repo timing (`waits_for`), and
+  following up before claiming anything shipped.
