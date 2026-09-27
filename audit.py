@@ -1248,6 +1248,63 @@ def _group(findings: list[dict]) -> dict[str, dict[str, list[dict]]]:
     return out
 
 
+# ── markdown safety ───────────────────────────────────────────────────────────
+# Reports quote untrusted text — a consumer repo's source, or a live page's markup, selectors and
+# copy — and they end up pasted into GitHub issues. Quoted text must stay DATA: it can't close a
+# fence, open a heading, @mention someone, reference/close an issue (#12, org/repo#12, "Fixes
+# #12"), or smuggle a link/image/HTML tag.
+
+_ZWJ = "\u200d"
+_SPAN_RE = re.compile(r"(`+)(.+?)\1", re.DOTALL)
+
+
+def md_neutralize(text: str) -> str:
+    """Defuse GitHub autolinks in plain text: ``@name`` and ``#123`` get a zero-width joiner."""
+    t = str(text).replace("@", "@" + _ZWJ)
+    return re.sub(r"#(?=\d+(?![\w-]))", "#" + _ZWJ, t)  # #123 is an issue ref; #7c8cff is a color
+
+
+def md_text(text, limit: int = 600) -> str:
+    """One line of report prose that may embed untrusted values. Whitespace collapses (no
+    newline can start a heading or a fence); outside our own `code` spans, mentions and issue
+    refs are neutralized and ``<``, ``[``/``]`` and ``!`` link/image/HTML syntax is escaped."""
+    t = " ".join(str(text or "").split())
+    if len(t) > limit:
+        t = t[: limit - 1] + "…"
+    out, pos = [], 0
+    for m in _SPAN_RE.finditer(t):
+        out.append(_md_plain(t[pos:m.start()]))
+        out.append(md_neutralize(m.group(0)))
+        pos = m.end()
+    out.append(_md_plain(t[pos:]))
+    return "".join(out)
+
+
+def _md_plain(t: str) -> str:
+    t = md_neutralize(t)
+    return t.replace("<", "&lt;").replace("[", "\\[").replace("]", "\\]")
+
+
+def md_code(text, limit: int = 300, table: bool = False) -> str:
+    """An inline code span that can hold anything: the backtick run is longer than any run in
+    the content, newlines collapse, and (in a table cell) ``|`` is escaped."""
+    t = " ".join(str(text or "").split())
+    if len(t) > limit:
+        t = t[: limit - 1] + "…"
+    t = md_neutralize(t)
+    if table:
+        t = t.replace("|", "\\|")
+    run = max((len(r) for r in re.findall(r"`+", t)), default=0) + 1
+    pad = " " if t.startswith("`") or t.endswith("`") or not t else ""
+    return f"{'`' * run}{pad}{t}{pad}{'`' * run}"
+
+
+def md_fence(content: str, lang: str = "") -> str:
+    """A fenced block whose fence is longer than any backtick run inside it (min 3)."""
+    run = max(3, max((len(r) for r in re.findall(r"`+", content or "")), default=0) + 1)
+    return f"{'`' * run}{lang}\n{content}\n{'`' * run}"
+
+
 def _fix_first(findings: list[dict], limit: int = 12, per_rule: int = 3) -> list[str]:
     """The groups that are broken or forked, most urgent first — so 18 unknown tokens aren't
     buried under a thousand spacing nits."""
@@ -1260,8 +1317,8 @@ def _fix_first(findings: list[dict], limit: int = 12, per_rule: int = 3) -> list
         groups = sorted(grouped.get(rule, {}).items(), key=lambda kv: -len(kv[1]))
         for key, items in groups[:per_rule]:
             first = items[0]
-            where = ", ".join(f"`{f['file']}:{f['line']}`" for f in items[:3]) + (f" +{len(items) - 3}" if len(items) > 3 else "")
-            out.append(f"- **{first['severity']}** `{rule}` **{key}** ×{len(items)} — {first['message']} ({where})")
+            where = ", ".join(md_code(_loc(f)) for f in items[:3]) + (f" +{len(items) - 3}" if len(items) > 3 else "")
+            out.append(f"- **{first['severity']}** `{rule}` **{md_text(key, 160)}** ×{len(items)} — {md_text(first['message'])} ({where})")
             if len(out) >= limit:
                 return out
         if len(groups) > per_rule:
@@ -1270,14 +1327,25 @@ def _fix_first(findings: list[dict], limit: int = 12, per_rule: int = 3) -> list
     return out
 
 
-def render_markdown(findings: list[dict], summary: dict, title: str = "Design-system audit", per_group: int = 5, groups_per_rule: int = 12, vocab=None) -> str:
+def _loc(item: dict) -> str:
+    """`file:line`, or just the location when there is no line (a URL, a rendered page)."""
+    return f"{item['file']}:{item['line']}" if item.get("line") else str(item.get("file") or "")
+
+
+def render_markdown(findings: list[dict], summary: dict, title: str = "Design-system audit", per_group: int = 5, groups_per_rule: int = 12, vocab=None,
+                    registry: dict | None = None, stats_line: str | None = None) -> str:
     """Human/agent report: DS lane first (what the design system must fix), then the consumer
-    lane, each rule grouped by theme with file:line evidence, capped with "+N more"."""
+    lane, each rule grouped by theme with file:line evidence, capped with "+N more".
+
+    ``registry`` (default ``RULES``) is the rule table sections are drawn from — the URL
+    auditor passes its own, a superset — and ``stats_line`` replaces the repo-shaped header
+    line ("N files, N token references…") when the audit wasn't over files."""
     s = summary
-    L = [f"# {title}", ""]
-    L.append(f"**Adherence score: {s['score']}/100** — {s['files_scanned']} files, {s['token_refs']} token references, "
+    rules_reg = registry or RULES
+    L = [f"# {md_text(title, 300)}", ""]
+    L.append(stats_line or (f"**Adherence score: {s['score']}/100** — {s['files_scanned']} files, {s['token_refs']} token references, "
              f"{s['ds_imports']} DS component imports. Findings: {s['by_lane'].get('consumer', 0)} consumer · {s['by_lane'].get('ds', 0)} design-system gaps "
-             f"({s['by_severity'].get('error', 0)} error, {s['by_severity'].get('warn', 0)} warn, {s['by_severity'].get('info', 0)} info).")
+             f"({s['by_severity'].get('error', 0)} error, {s['by_severity'].get('warn', 0)} warn, {s['by_severity'].get('info', 0)} info)."))
     L.append("")
     L.append(f"<sub>{s['score_formula']}</sub>")
     if vocab is not None and vocab.missing_scales():
@@ -1293,37 +1361,37 @@ def render_markdown(findings: list[dict], summary: dict, title: str = "Design-sy
     # Priority order, not count order: a thousand spacing nits mustn't sit above 18 broken tokens.
     order = [r for r in CONSUMER_PRIORITY if r in s["by_rule"]] + [r for r in s["by_rule"] if r not in CONSUMER_PRIORITY]
     for rule in order:
-        L.append(f"| `{rule}` | {RULES.get(rule, {}).get('lane', '?')} | {s['by_rule'][rule]} |")
+        L.append(f"| `{rule}` | {rules_reg.get(rule, {}).get('lane', '?')} | {s['by_rule'][rule]} |")
     if s["top_files"]:
         L.append("")
-        L.append("Top offending files: " + ", ".join(f"`{p}` ({n})" for p, n in s["top_files"][:8]))
+        L.append("Top offending files: " + ", ".join(f"{md_code(p)} ({n})" for p, n in s["top_files"][:8]))
     grouped = _group(findings)
     for lane, heading in (("ds", "Design-system lane — gaps the DS should fix (file in the DS repo)"),
                           ("consumer", "Consumer lane — violations this codebase should fix")):
-        order = list(CONSUMER_PRIORITY) + [r for r in RULES if r not in CONSUMER_PRIORITY]
-        rules = [r for r in order if RULES[r]["lane"] == lane and r in grouped]
+        order = list(CONSUMER_PRIORITY) + [r for r in rules_reg if r not in CONSUMER_PRIORITY]
+        rules = [r for r in order if rules_reg.get(r, {}).get("lane") == lane and r in grouped]
         if not rules:
             continue
         L += ["", f"## {heading}"]
         for rule in rules:
             groups = grouped[rule]
             total = sum(len(g) for g in groups.values())
-            L += ["", f"### `{rule}` — {RULES[rule]['summary']} ({total})"]
+            L += ["", f"### `{rule}` — {rules_reg[rule]['summary']} ({total})"]
             ordered = sorted(groups.items(), key=lambda kv: -len(kv[1]))
             for key, items in ordered[:groups_per_rule]:
                 first = items[0]
                 if lane == "ds":
-                    L.append(f"- **{first['message']}**")
-                    L.append(f"  - {first['suggestion']}")
+                    L.append(f"- **{md_text(first['message'])}**")
+                    L.append(f"  - {md_text(first['suggestion'])}")
                     ev = first.get("evidence") or []
                     for e in ev[:per_group]:
-                        L.append(f"  - `{e['file']}:{e['line']}` `{e['snippet']}`")
+                        L.append(f"  - {md_code(_loc(e))} {md_code(e['snippet'])}")
                     if len(ev) > per_group:
                         L.append(f"  - +{len(ev) - per_group} more")
                     continue
-                L.append(f"- **{key}** ×{len(items)} — {first['message']}" + (f" → {first['suggestion']}" if first.get("suggestion") else ""))
+                L.append(f"- **{md_text(key, 160)}** ×{len(items)} — {md_text(first['message'])}" + (f" → {md_text(first['suggestion'])}" if first.get("suggestion") else ""))
                 for f in items[:per_group]:
-                    L.append(f"  - `{f['file']}:{f['line']}` `{f['snippet']}`")
+                    L.append(f"  - {md_code(_loc(f))} {md_code(f['snippet'])}")
                 if len(items) > per_group:
                     L.append(f"  - +{len(items) - per_group} more")
             if len(ordered) > groups_per_rule:
@@ -1334,12 +1402,12 @@ def render_markdown(findings: list[dict], summary: dict, title: str = "Design-sy
     return "\n".join(L) + "\n"
 
 
-def render_json(findings: list[dict], summary: dict, root: str = "", vocab=None) -> str:
+def render_json(findings: list[dict], summary: dict, root: str = "", vocab=None, registry: dict | None = None) -> str:
     return json.dumps({
         "root": root,
         "summary": summary,
         "vocab": vocab.summary() if vocab is not None else None,
-        "rules": RULES,
+        "rules": registry or RULES,
         "findings": findings,
     }, indent=1, default=str)
 
