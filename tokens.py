@@ -17,9 +17,37 @@ import re
 
 _COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 _BLOCK_RE = re.compile(r"(?P<sel>[^{}]+)\{(?P<body>[^{}]*)\}", re.S)
-_DECL_RE = re.compile(r"(--[a-zA-Z0-9-]+)\s*:\s*([^;]+);")
-# The light-preference wrapper, with its whole (single-nesting) body.
-_LIGHT_MEDIA_RE = re.compile(r"@media[^{]*prefers-color-scheme\s*:\s*light[^{]*\{(?P<body>.*?)\n\}", re.S)
+# A ``;`` OR end-of-block ends a declaration: a minifier drops the trailing ``;`` on the LAST
+# declaration in a block, so anchoring only on ``;`` would silently lose it.
+_DECL_RE = re.compile(r"(--[a-zA-Z0-9-]+)\s*:\s*([^;]+?)\s*(?:;|$)")
+# The opening of a light-preference wrapper, up to and including its ``{``. Its body is then
+# taken by BRACE DEPTH (see _extract_light_media) rather than by a trailing ``\n}`` — the old
+# anchor lost the light theme whenever tokens.css was minified (no newline before the close) or
+# reindented (the close not at column 0).
+_LIGHT_MEDIA_OPEN_RE = re.compile(r"@media[^{}]*prefers-color-scheme\s*:\s*light[^{}]*\{", re.I)
+
+
+def _extract_light_media(css: str) -> tuple[list[str], str]:
+    """Pull every ``@media (prefers-color-scheme: light) { … }`` block out of ``css`` by matching
+    braces, tolerating any formatting. Returns ``(bodies, outer)``: the inner text of each block,
+    and ``css`` with each block replaced by a space (mirroring the old ``.sub(" ")``)."""
+    bodies: list[str] = []
+    out: list[str] = []
+    i, n = 0, len(css)
+    while i < n:
+        m = _LIGHT_MEDIA_OPEN_RE.search(css, i)
+        if not m:
+            out.append(css[i:])
+            break
+        out.append(css[i:m.start()])
+        depth, j = 1, m.end()  # m.end() sits just past the block's opening brace
+        while j < n and depth:
+            depth += 1 if css[j] == "{" else -1 if css[j] == "}" else 0
+            j += 1
+        bodies.append(css[m.end():j - 1 if depth == 0 else n])
+        out.append(" ")
+        i = j
+    return bodies, "".join(out)
 
 _COLOR_RE = re.compile(r"^(#[0-9a-fA-F]{3,8}|rgba?\(|hsla?\(|oklch\(|color\()")
 _LENGTH_RE = re.compile(r"^-?[\d.]+(px|rem|em|%|ch|vh|vw)$")
@@ -101,11 +129,11 @@ def parse_css(css: str, scope: str = "") -> dict[str, dict[str, str]]:
     overrides — never an override block alone, which would drop every unchanged token.
     """
     text = css or ""
+    bodies, outer = _extract_light_media(text)
     light_media: dict[str, str] = {}
-    for m in _LIGHT_MEDIA_RE.finditer(text):
-        for _, decls in _blocks(m.group("body")):
+    for body in bodies:
+        for _, decls in _blocks(body):
             light_media.update(decls)
-    outer = _LIGHT_MEDIA_RE.sub(" ", text)
 
     base: dict[str, str] = {}
     dark_over: dict[str, str] = {}
