@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -81,7 +82,12 @@ def _emit(topic: str, data: dict) -> None:
 
 
 def _cfg(key: str) -> str:
-    return str(_CFG.get(key) or _DEFAULTS.get(key) or "")
+    """The configured value for ``key``. A key PRESENT in the live config (even set to "")
+    wins over its default, so ``storybook_url: ""`` / ``watch_cron: ""`` genuinely DISABLE the
+    feature instead of silently falling back — only a key ABSENT from ``_CFG`` reads through to
+    ``_DEFAULTS``. (The old ``_CFG.get(key) or _DEFAULTS.get(key)`` treated a blank as unset.)"""
+    val = _CFG[key] if key in _CFG else _DEFAULTS.get(key)
+    return "" if val is None else str(val)
 
 
 # ── GitHub contents API (token-authed; protoContent is private) ───────────────
@@ -267,6 +273,7 @@ def ds_rules() -> str:
 
 _CLASS_RE = re.compile(r"\.(pl-[a-z0-9-]+)", re.I)
 _KIT_CACHE: tuple[float, list[str]] | None = None
+_KIT_LOCK = threading.Lock()
 
 
 def _kit_classes(force: bool = False) -> list[str]:
@@ -284,9 +291,14 @@ def _kit_classes(force: bool = False) -> list[str]:
         raise RuntimeError("no kit_css_path configured")
     if not force and _KIT_CACHE and (time.time() - _KIT_CACHE[0]) < _FETCH_TTL:
         return _KIT_CACHE[1]
-    names = sorted(set(_CLASS_RE.findall(_gh_get_raw(path))))
-    _KIT_CACHE = (time.time(), names)
-    return names
+    with _KIT_LOCK:
+        # Re-check under the lock: another thread may have filled the cache while we waited, so N
+        # concurrent callers share ONE fetch instead of racing N (single-flight).
+        if not force and _KIT_CACHE and (time.time() - _KIT_CACHE[0]) < _FETCH_TTL:
+            return _KIT_CACHE[1]
+        names = sorted(set(_CLASS_RE.findall(_gh_get_raw(path))))
+        _KIT_CACHE = (time.time(), names)
+        return names
 
 
 @tool
@@ -324,6 +336,7 @@ def _token_sections() -> list[dict]:
 # to prevent. Pure parsing lives in storybook.py; the fetch + tool surface is here.
 
 _SB_CACHE: tuple[float, list[dict]] | None = None  # (fetched_at, components)
+_SB_LOCK = threading.Lock()
 _FETCH_TTL = 300.0  # the DS moves on deploys, not per-turn; a 5-min cache is plenty
 
 
@@ -345,20 +358,25 @@ def _sb_components(force: bool = False) -> list[dict]:
     if not force and _SB_CACHE and (time.time() - _SB_CACHE[0]) < _FETCH_TTL:
         return _SB_CACHE[1]
 
-    import httpx
+    with _SB_LOCK:
+        # Re-check under the lock so concurrent callers share one fetch (single-flight).
+        if not force and _SB_CACHE and (time.time() - _SB_CACHE[0]) < _FETCH_TTL:
+            return _SB_CACHE[1]
 
-    try:
-        r = httpx.get(f"{base}/index.json", headers={"User-Agent": "protoagent-design-system"}, follow_redirects=True, timeout=20.0)
-        r.raise_for_status()
-        index = r.json()
-    except httpx.HTTPError as e:
-        raise RuntimeError(f"could not fetch the Storybook index from {base} ({type(e).__name__})") from e
-    except ValueError as e:
-        raise RuntimeError(f"{base}/index.json is not JSON — is storybook_url the Storybook ROOT?") from e
+        import httpx
 
-    comps = _sb_mod().parse_index(index)
-    _SB_CACHE = (time.time(), comps)
-    return comps
+        try:
+            r = httpx.get(f"{base}/index.json", headers={"User-Agent": "protoagent-design-system"}, follow_redirects=True, timeout=20.0)
+            r.raise_for_status()
+            index = r.json()
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"could not fetch the Storybook index from {base} ({type(e).__name__})") from e
+        except ValueError as e:
+            raise RuntimeError(f"{base}/index.json is not JSON — is storybook_url the Storybook ROOT?") from e
+
+        comps = _sb_mod().parse_index(index)
+        _SB_CACHE = (time.time(), comps)
+        return comps
 
 
 @tool
@@ -418,6 +436,8 @@ def _hex_token_map(tokens: object, path: list[str] | None = None, out: dict[str,
 
 _VOCAB_CACHE: tuple[float, tuple, object] | None = None   # (fetched_at, key, Vocab)
 _INV_CACHE: tuple[float, tuple, list[str]] | None = None  # (fetched_at, key, names)
+_VOCAB_LOCK = threading.Lock()
+_INV_LOCK = threading.Lock()
 _AUDIT_ROOTS: list[str] = []  # plugin setting `audit_roots` — extra dirs ds_audit_repo may read
 
 
@@ -442,32 +462,36 @@ def _vocab(force: bool = False):
     key = (_cfg("repo"), _cfg("ref"), _cfg("tokens_css_path"), _cfg("tokens_path"), id(_gh_get_raw))
     if not force and _VOCAB_CACHE and _VOCAB_CACHE[1] == key and (time.time() - _VOCAB_CACHE[0]) < _FETCH_TTL:
         return _VOCAB_CACHE[2]
-    vm = _vocab_mod()
-    errors = []
-    css = ""
-    try:
-        css = _gh_get_raw(_cfg("tokens_css_path"))
-    except RuntimeError as e:
-        errors.append(str(e))
-    tokens_json = None
-    if not vm.build_vocab(css).names:
-        # No custom properties parsed out of the CSS (missing, empty, or a shape we can't
-        # read) — the JSON token source is the fallback, never an empty vocabulary.
+    with _VOCAB_LOCK:
+        # Re-check under the lock so concurrent callers share one fetch/build (single-flight).
+        if not force and _VOCAB_CACHE and _VOCAB_CACHE[1] == key and (time.time() - _VOCAB_CACHE[0]) < _FETCH_TTL:
+            return _VOCAB_CACHE[2]
+        vm = _vocab_mod()
+        errors = []
+        css = ""
         try:
-            tokens_json = _gh_get_raw(_cfg("tokens_path"))
+            css = _gh_get_raw(_cfg("tokens_css_path"))
         except RuntimeError as e:
             errors.append(str(e))
-    extra: set[str] = set()
-    if _cfg("kit_css_path"):
-        try:
-            extra = vm.kit_custom_properties(_gh_get_raw(_cfg("kit_css_path")))
-        except RuntimeError:
-            extra = set()  # the kit is optional; its absence only means fewer known component vars
-    v = vm.build_vocab(css, tokens_json, extra)
-    if v.source == "empty":
-        raise RuntimeError("no design tokens found (" + ("; ".join(errors) or f"{_cfg('tokens_css_path')} declares no custom properties") + ")")
-    _VOCAB_CACHE = (time.time(), key, v)
-    return v
+        tokens_json = None
+        if not vm.build_vocab(css).names:
+            # No custom properties parsed out of the CSS (missing, empty, or a shape we can't
+            # read) — the JSON token source is the fallback, never an empty vocabulary.
+            try:
+                tokens_json = _gh_get_raw(_cfg("tokens_path"))
+            except RuntimeError as e:
+                errors.append(str(e))
+        extra: set[str] = set()
+        if _cfg("kit_css_path"):
+            try:
+                extra = vm.kit_custom_properties(_gh_get_raw(_cfg("kit_css_path")))
+            except RuntimeError:
+                extra = set()  # the kit is optional; its absence only means fewer known component vars
+        v = vm.build_vocab(css, tokens_json, extra)
+        if v.source == "empty":
+            raise RuntimeError("no design tokens found (" + ("; ".join(errors) or f"{_cfg('tokens_css_path')} declares no custom properties") + ")")
+        _VOCAB_CACHE = (time.time(), key, v)
+        return v
 
 
 def _inventory(force: bool = False) -> list[str]:
@@ -482,31 +506,35 @@ def _inventory(force: bool = False) -> list[str]:
     key = (_cfg("repo"), _cfg("ref"), _cfg("components_path"), id(_gh_list), id(_gh_get_raw))
     if not force and _INV_CACHE and _INV_CACHE[1] == key and (time.time() - _INV_CACHE[0]) < _FETCH_TTL:
         return _INV_CACHE[2]
-    au = _audit_mod()
-    names: set[str] = set()
-    try:
-        entries = _gh_list(_cfg("components_path"))
-        names |= set(_component_names(entries))
-        sources = [
-            e["name"] for e in entries
-            if re.search(r"\.(tsx|jsx|ts|js)$", str(e.get("name", "")))
-            and not re.search(r"\.(stories|test|spec)\.", str(e.get("name", "")))
-        ][:40]
-        for fn in sources:
-            try:
-                names |= set(au.exported_components(_gh_get_raw(f"{_cfg('components_path')}/{fn}")))
-            except RuntimeError:
-                continue
-    except RuntimeError:
-        pass
-    if not names:
+    with _INV_LOCK:
+        # Re-check under the lock so concurrent callers share one fetch (single-flight).
+        if not force and _INV_CACHE and _INV_CACHE[1] == key and (time.time() - _INV_CACHE[0]) < _FETCH_TTL:
+            return _INV_CACHE[2]
+        au = _audit_mod()
+        names: set[str] = set()
         try:
-            names = {c["title"].split("/")[-1].replace(" ", "") for c in _sb_components()}
+            entries = _gh_list(_cfg("components_path"))
+            names |= set(_component_names(entries))
+            sources = [
+                e["name"] for e in entries
+                if re.search(r"\.(tsx|jsx|ts|js)$", str(e.get("name", "")))
+                and not re.search(r"\.(stories|test|spec)\.", str(e.get("name", "")))
+            ][:40]
+            for fn in sources:
+                try:
+                    names |= set(au.exported_components(_gh_get_raw(f"{_cfg('components_path')}/{fn}")))
+                except RuntimeError:
+                    continue
         except RuntimeError:
-            names = set()
-    out = sorted(names)
-    _INV_CACHE = (time.time(), key, out)
-    return out
+            pass
+        if not names:
+            try:
+                names = {c["title"].split("/")[-1].replace(" ", "") for c in _sb_components()}
+            except RuntimeError:
+                names = set()
+        out = sorted(names)
+        _INV_CACHE = (time.time(), key, out)
+        return out
 
 
 def _guess_filename(code: str) -> str:
@@ -1095,16 +1123,36 @@ def _ds_component_gaps(probe: str) -> str:
 # ── drift snapshot + watch ─────────────────────────────────────────────────────
 
 
+def _migrate_legacy_dirs(legacy_dir: Path, cur: Path) -> None:
+    """Copy the legacy ``audits/`` and ``themes/`` dirs into the SDK store once — only a subdir
+    the new path doesn't already have, so a re-run never clobbers fresh output. Best-effort: a
+    copy failure is logged and skipped, never fatal to the caller."""
+    import shutil
+
+    for sub in ("audits", "themes"):
+        src, dst = legacy_dir / sub, cur / sub
+        if src.is_dir() and not dst.exists():
+            try:
+                shutil.copytree(src, dst)
+            except OSError as e:
+                log.warning("[design-system] could not migrate legacy %s dir: %s", sub, e)
+
+
 def _snap_path() -> Path:
-    """Instance-scoped drift snapshot. Migrates a snapshot left at the legacy path once, so
-    moving to the SDK store doesn't cost the next drift check its baseline."""
-    p = _data_dir() / "snapshot.json"
-    legacy = _legacy_data_dir() / "snapshot.json"
-    if not p.exists() and legacy.exists() and legacy != p and not os.environ.get("DESIGN_SYSTEM_DIR"):
-        try:
-            p.write_text(legacy.read_text())
-        except OSError:
-            pass
+    """Instance-scoped drift snapshot. Migrates a snapshot left at the legacy path — and, once,
+    the legacy audits/ and themes/ report dirs — so moving to the SDK store doesn't cost the next
+    drift check its baseline or strand past reports/themes at the old home-dir path."""
+    cur = _data_dir()
+    p = cur / "snapshot.json"
+    legacy_dir = _legacy_data_dir()
+    if legacy_dir != cur and not os.environ.get("DESIGN_SYSTEM_DIR"):
+        legacy = legacy_dir / "snapshot.json"
+        if not p.exists() and legacy.exists():
+            try:
+                p.write_text(legacy.read_text())
+            except OSError:
+                pass
+        _migrate_legacy_dirs(legacy_dir, cur)
     return p
 
 
@@ -1115,49 +1163,75 @@ def _fingerprint() -> dict:
     return {"tokens_sha": hashlib.sha256(tokens.encode()).hexdigest(), "components": comps}
 
 
+# Serialises the whole read→diff→emit→persist of a drift check, so a scheduled call and a manual
+# one can't both diff against — and emit design-system.drift-detected for — the same prior
+# snapshot before either writes the new one.
+_DRIFT_LOCK = threading.Lock()
+
+
+def _persist_snapshot(p: Path, cur: dict) -> None:
+    """Write the current fingerprint as the new baseline. Isolated so the drift ordering (persist
+    LAST, after the diff is built and emitted) is testable and a write failure stays non-fatal."""
+    p.write_text(json.dumps(cur, indent=1))
+
+
 @tool
 def ds_drift() -> str:
     """What changed in the design system since the last check — token changes and components
     added/removed — then update the stored snapshot. The drift watch calls this on a cadence;
     call it any time to reconcile. First run records a baseline."""
-    try:
-        cur = _fingerprint()
-    except RuntimeError as e:
-        return f"ds_drift error: {e}"
-    p = _snap_path()
-    prev: dict = {}
-    if p.exists():
+    with _DRIFT_LOCK:
         try:
-            prev = json.loads(p.read_text())
-        except (json.JSONDecodeError, OSError):
-            prev = {}
-    try:
-        p.write_text(json.dumps(cur, indent=1))
-    except OSError as e:
-        log.warning("[design-system] could not write drift snapshot: %s", e)
-    if not prev:
-        return f"ds_drift: baseline recorded ({len(cur['components'])} components). No prior snapshot to diff against yet."
-    changes = []
-    if prev.get("tokens_sha") != cur["tokens_sha"]:
-        changes.append("• TOKENS changed — run ds_tokens to see the current vocabulary and reconcile consumers.")
-    added = sorted(set(cur["components"]) - set(prev.get("components", [])))
-    removed = sorted(set(prev.get("components", [])) - set(cur["components"]))
-    if added:
-        changes.append(f"• Components ADDED: {', '.join(added)} — document them / check they use tokens.")
-    if removed:
-        changes.append(f"• Components REMOVED: {', '.join(removed)} — check for dangling references + docs.")
-    if not changes:
-        return "ds_drift: no change since the last check. ✓"
-    # Broadcast it: consumers (docs, a console badge, another plugin) subscribe by topic
-    # rather than this plugin knowing who they are.
-    _emit("drift-detected", {
-        "repo": _cfg("repo"),
-        "ref": _cfg("ref"),
-        "tokens_changed": prev.get("tokens_sha") != cur["tokens_sha"],
-        "components_added": added,
-        "components_removed": removed,
-    })
-    return "Design-system DRIFT since last check:\n" + "\n".join(changes)
+            cur = _fingerprint()
+        except RuntimeError as e:
+            return f"ds_drift error: {e}"
+        p = _snap_path()
+        prev: dict = {}
+        if p.exists():
+            try:
+                prev = json.loads(p.read_text())
+            except (json.JSONDecodeError, OSError):
+                prev = {}
+
+        def _persist() -> None:
+            # Persisted LAST and non-fatally: a snapshot write failure must not swallow a drift
+            # the caller (and any subscriber) still needs to see.
+            try:
+                _persist_snapshot(p, cur)
+            except OSError as e:
+                log.warning("[design-system] could not write drift snapshot: %s", e)
+
+        if not prev:
+            _persist()
+            return f"ds_drift: baseline recorded ({len(cur['components'])} components). No prior snapshot to diff against yet."
+
+        tokens_changed = prev.get("tokens_sha") != cur["tokens_sha"]
+        added = sorted(set(cur["components"]) - set(prev.get("components", [])))
+        removed = sorted(set(prev.get("components", [])) - set(cur["components"]))
+        changes = []
+        if tokens_changed:
+            changes.append("• TOKENS changed — run ds_tokens to see the current vocabulary and reconcile consumers.")
+        if added:
+            changes.append(f"• Components ADDED: {', '.join(added)} — document them / check they use tokens.")
+        if removed:
+            changes.append(f"• Components REMOVED: {', '.join(removed)} — check for dangling references + docs.")
+
+        if not changes:
+            _persist()
+            return "ds_drift: no change since the last check. ✓"
+
+        # Build the result and broadcast it (consumers subscribe by topic rather than this plugin
+        # knowing who they are), THEN persist — the diff is computed against `prev`, so a failed
+        # write can't corrupt what we return or emit.
+        _emit("drift-detected", {
+            "repo": _cfg("repo"),
+            "ref": _cfg("ref"),
+            "tokens_changed": tokens_changed,
+            "components_added": added,
+            "components_removed": removed,
+        })
+        _persist()
+        return "Design-system DRIFT since last check:\n" + "\n".join(changes)
 
 
 # ── design-critic subagent ────────────────────────────────────────────────────
@@ -1750,9 +1824,12 @@ def register(registry) -> None:
     cfg = registry.config or {}
     _EMIT = getattr(registry, "emit", None)
     for k in _DEFAULTS:
-        v = cfg.get(k)
-        if v not in (None, ""):
-            _CFG[k] = str(v)
+        # A key PRESENT in the config is recorded verbatim — a blank included — so an operator
+        # who clears storybook_url / watch_cron actually disables it (see _cfg). Only a key the
+        # config omits keeps the default already sitting in _CFG.
+        if k in cfg:
+            v = cfg.get(k)
+            _CFG[k] = "" if v is None else str(v)
     _AUDIT_ROOTS = _parse_roots(cfg.get("audit_roots"))
     # View PAGE: public /plugins/design-system (ungated) — iframe nav carries no bearer.
     registry.register_router(_build_view_router(), prefix="/plugins/design-system")

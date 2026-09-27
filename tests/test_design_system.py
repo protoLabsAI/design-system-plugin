@@ -940,3 +940,198 @@ def test_declares_the_host_version_its_seams_need():
     floor = manifest.get("min_protoagent_version")
     assert floor, "no min_protoagent_version — silent degradation on an old host"
     assert tuple(int(x) for x in str(floor).split(".")) >= (0, 99, 0), floor
+
+
+# ── hardening follow-ups (#20) ─────────────────────────────────────────────────
+
+
+def test_cfg_present_blank_disables_absent_falls_back(monkeypatch):
+    """REGRESSION: `_CFG.get(key) or _DEFAULTS.get(key)` treated "" as unset, so a blank could
+    never turn a feature off. A key PRESENT-but-blank must win; only an ABSENT key defaults."""
+    monkeypatch.setitem(ds._CFG, "storybook_url", "")
+    monkeypatch.setitem(ds._CFG, "watch_cron", "")
+    assert ds._cfg("storybook_url") == ""          # blank wins → gallery / story tools off
+    assert ds._cfg("watch_cron") == ""
+    monkeypatch.delitem(ds._CFG, "repo", raising=False)
+    assert ds._cfg("repo") == ds._DEFAULTS["repo"]  # an absent key still reads the default
+
+
+def test_blank_storybook_url_disables_the_gallery(monkeypatch):
+    """The observable effect of the blank-disable fix: an empty storybook_url turns the
+    Storybook-backed tools off rather than silently defaulting to the shipped URL."""
+    monkeypatch.setattr(ds, "_SB_CACHE", None, raising=False)
+    monkeypatch.setitem(ds._CFG, "storybook_url", "")
+    with pytest.raises(RuntimeError, match="no storybook_url configured"):
+        ds._sb_components()
+
+
+class _FakeRegistry:
+    def __init__(self, config):
+        self.config = config
+        self.plugin_id = "design-system"
+        self.emit = None
+        self.routers, self.tools, self.subagents = [], [], []
+
+    def register_router(self, router, prefix=""):
+        self.routers.append((router, prefix))
+
+    def register_tools(self, tools):
+        self.tools.extend(tools)
+
+    def register_subagent(self, cfg):
+        self.subagents.append(cfg)
+
+
+def test_register_records_a_blank_rather_than_keeping_the_default(monkeypatch):
+    """register() must persist a present-but-blank config value into _CFG (not skip it), or the
+    _cfg fix can never see the blank — an operator who clears storybook_url/watch_cron disables it."""
+    monkeypatch.setattr(ds, "_CFG", dict(ds._DEFAULTS))
+    ds.register(_FakeRegistry({"storybook_url": "", "watch_cron": "", "ref": "release-1"}))
+    assert ds._cfg("storybook_url") == ""            # blank recorded → disabled
+    assert ds._cfg("watch_cron") == ""
+    assert ds._cfg("ref") == "release-1"             # a real override still lands
+    assert ds._cfg("repo") == ds._DEFAULTS["repo"]   # an omitted key keeps its default
+
+
+def test_snap_path_migrates_legacy_audits_and_themes(monkeypatch, tmp_path):
+    """Moving to the SDK store must not strand past audit/theme reports (or the drift baseline)
+    at the old home-dir path."""
+    monkeypatch.delenv("DESIGN_SYSTEM_DIR", raising=False)
+    legacy, cur = tmp_path / "legacy", tmp_path / "cur"
+    (legacy / "audits").mkdir(parents=True)
+    (legacy / "themes").mkdir(parents=True)
+    (legacy / "audits" / "old-20250101-000000.md").write_text("old audit")
+    (legacy / "themes" / "acme.theme.css").write_text(":root{}")
+    (legacy / "snapshot.json").write_text('{"tokens_sha": "abc", "components": []}')
+    cur.mkdir()
+    monkeypatch.setattr(ds, "_legacy_data_dir", lambda: legacy)
+    monkeypatch.setattr(ds, "_data_dir", lambda: cur)
+
+    p = ds._snap_path()
+    assert p == cur / "snapshot.json"
+    assert p.read_text() == '{"tokens_sha": "abc", "components": []}'          # baseline carried over
+    assert (cur / "audits" / "old-20250101-000000.md").read_text() == "old audit"
+    assert (cur / "themes" / "acme.theme.css").read_text() == ":root{}"
+
+    # Idempotent: a subdir already present at the new path is never clobbered by a re-run.
+    (cur / "audits" / "fresh.md").write_text("fresh")
+    (legacy / "audits" / "old-20250101-000000.md").write_text("MUTATED")
+    ds._snap_path()
+    assert (cur / "audits" / "fresh.md").read_text() == "fresh"
+    assert (cur / "audits" / "old-20250101-000000.md").read_text() == "old audit"
+
+
+def test_ds_drift_returns_and_emits_even_when_persist_fails(monkeypatch):
+    """REGRESSION: the snapshot used to be written BEFORE the diff. Now it's persisted LAST and
+    non-fatally, so a write failure can't swallow a drift the caller and subscribers still need."""
+    seen = []
+    monkeypatch.setattr(ds, "_EMIT", lambda t, d: seen.append((t, d)))
+    state = {"tok": "v1", "comp": [{"name": "Button.stories.tsx"}]}
+    monkeypatch.setattr(ds, "_gh_get_raw", lambda p: state["tok"])
+    monkeypatch.setattr(ds, "_gh_list", lambda p: state["comp"])
+    assert "baseline" in _call(ds.ds_drift).lower()
+
+    def _boom(p, cur):
+        raise OSError("disk full")
+    monkeypatch.setattr(ds, "_persist_snapshot", _boom)
+    state["tok"] = "v2"
+    state["comp"] = [{"name": "Button.stories.tsx"}, {"name": "Toast.stories.tsx"}]
+    out = _call(ds.ds_drift)
+    assert "DRIFT" in out and "Toast" in out and "TOKENS changed" in out
+    assert [t for t, _ in seen] == ["drift-detected"]          # emitted despite the persist failure
+    assert seen[0][1]["components_added"] == ["Toast"] and seen[0][1]["tokens_changed"] is True
+
+
+def test_ds_drift_concurrent_calls_emit_once(monkeypatch):
+    """REGRESSION: a scheduled call and a manual one must not both emit drift-detected against the
+    same prior snapshot — read→diff→emit→persist is serialised by a module lock."""
+    import threading
+
+    seen, seen_lock = [], threading.Lock()
+
+    def _emit(t, d):
+        with seen_lock:
+            seen.append((t, d))
+    monkeypatch.setattr(ds, "_EMIT", _emit)
+    state = {"tok": "v1", "comp": [{"name": "Button.stories.tsx"}]}
+    monkeypatch.setattr(ds, "_gh_get_raw", lambda p: state["tok"])
+    monkeypatch.setattr(ds, "_gh_list", lambda p: state["comp"])
+    _call(ds.ds_drift)                                          # baseline
+
+    state["tok"] = "v2"
+    state["comp"] = [{"name": "Button.stories.tsx"}, {"name": "Toast.stories.tsx"}]
+    start = threading.Barrier(8)
+
+    def _run():
+        start.wait()
+        _call(ds.ds_drift)
+    threads = [threading.Thread(target=_run) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(seen) == 1, seen                                 # only the first observer emits
+
+
+def test_kit_cache_is_single_flight(monkeypatch):
+    """REGRESSION: the TTL caches used an unsynchronised check-then-set, so N concurrent callers
+    each fetched. Re-checking under a per-cache lock collapses that to ONE fetch."""
+    import threading
+    import time as _time
+
+    monkeypatch.setattr(ds, "_KIT_CACHE", None, raising=False)
+    calls, calls_lock = [], threading.Lock()
+
+    def _slow(path):
+        with calls_lock:
+            calls.append(path)
+        _time.sleep(0.05)                                      # hold the fetch open so others pile on the lock
+        return ".pl-btn{}.pl-card{}"
+    monkeypatch.setattr(ds, "_gh_get_raw", _slow)
+
+    start = threading.Barrier(6)
+    results, results_lock = [], threading.Lock()
+
+    def _run():
+        start.wait()
+        r = ds._kit_classes()
+        with results_lock:
+            results.append(r)
+    threads = [threading.Thread(target=_run) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(calls) == 1, f"expected a single-flight fetch, got {len(calls)}"
+    assert results and all(r == ["pl-btn", "pl-card"] for r in results)
+
+
+def test_parse_css_light_media_survives_minified_and_reindented():
+    """REGRESSION: the old `\\n}` anchor required the light @media's closing brace at column 0, so
+    it lost the light theme on a minified (no newline before the close) or reindented tokens.css.
+    Brace-depth scanning keeps it regardless of formatting."""
+    minified = (
+        ":root{--pl-color-bg:#0a0a0c;--pl-color-fg:#ededed}"
+        "@media(prefers-color-scheme:light){:root{--pl-color-bg:#f6f7f9;--pl-color-fg:#18181b}}"
+    )
+    th_min = tk.parse_css(minified)
+    assert th_min["dark"]["--pl-color-bg"] == "#0a0a0c"
+    assert th_min["light"]["--pl-color-bg"] == "#f6f7f9"
+    assert th_min["light"]["--pl-color-fg"] == "#18181b"
+
+    reindented = (
+        "    :root {\n"
+        "        --pl-color-bg: #0a0a0c;\n"
+        "        --pl-color-fg: #ededed;\n"
+        "    }\n"
+        "    @media (prefers-color-scheme: light) {\n"
+        "        :root {\n"
+        "            --pl-color-bg: #f6f7f9;\n"
+        "            --pl-color-fg: #18181b;\n"
+        "        }\n"
+        "    }\n"
+    )
+    th_re = tk.parse_css(reindented)
+    assert th_re["dark"]["--pl-color-bg"] == "#0a0a0c"
+    assert th_re["light"]["--pl-color-bg"] == "#f6f7f9"
+    assert th_re["light"]["--pl-color-fg"] == "#18181b"
