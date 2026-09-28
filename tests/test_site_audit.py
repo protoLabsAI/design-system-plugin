@@ -310,6 +310,18 @@ def test_ds_audit_url_on_a_probe_writes_both_reports(plugin, tmp_path):
     assert str(md[0]) in out
 
 
+@pytest.mark.parametrize("visible", [0, 4])
+def test_an_empty_probe_gets_no_verdict_not_a_perfect_score(plugin, tmp_path, visible):
+    """#27: a probe taken before a Storybook story mounted (0 visible elements) scored
+    100/100. Too little on the page to judge → refused, no score, no report written."""
+    empty = dict(json.loads(DS_PROBE) if isinstance(DS_PROBE, str) else DS_PROBE, visible=visible)
+    out = plugin.ds_audit_url.invoke({"url_or_probe": json.dumps(empty)})
+    assert "no verdict" in out and "Adherence score" not in out and "hadn't rendered" in out
+    assert not list((tmp_path / "audits").glob("*.md"))
+    gaps = plugin.ds_component_gaps.invoke({"probe": json.dumps(empty)})
+    assert "no verdict" in gaps
+
+
 def test_ds_audit_url_merges_several_pages(plugin):
     both = json.dumps([json.dumps(DS_PROBE), json.dumps(FOREIGN_PROBE)])
     out = plugin.ds_audit_url.invoke({"url_or_probe": both})

@@ -901,13 +901,29 @@ def _url_label(url: str) -> str:
     return (u.hostname or "site") + (u.path.rstrip("/").replace("/", "_") if u.path and u.path != "/" else "")
 
 
+# Fewer visible elements than this is not a page to judge — almost always a probe taken
+# before a client-rendered page (a Storybook story, an SPA route) mounted. #27: an empty
+# probe used to score a meaningless 100/100.
+_MIN_VISIBLE = 5
+
+
 def _load_probe(text: str):
-    """(merged probe, None) or (None, error string)."""
+    """(merged probe, None) or (None, error string). A probe that saw (almost) nothing
+    is refused rather than judged: no score, no theme."""
     sp = _siteprobe_mod()
     try:
-        return sp.merge_probes(sp.parse_probe(text)), None
+        probe = sp.merge_probes(sp.parse_probe(text))
     except (ValueError, RecursionError) as e:
         return None, str(e)[:500]
+    visible = int(probe.get("visible") or 0)
+    if visible < _MIN_VISIBLE:
+        return None, (
+            f"the probe saw only {visible} visible element(s), so there is nothing to judge — no verdict. "
+            "The page most likely hadn't rendered yet (a Storybook story or an SPA mounts after load). "
+            "Wait for it (browser_wait for a selector, or a few seconds), re-run ds_site_probe_script with "
+            "browser_eval, and pass the new probe."
+        )
+    return probe, None
 
 
 @tool
