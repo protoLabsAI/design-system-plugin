@@ -28,11 +28,18 @@ cc = _load("ds_test_colorcore", "colorcore.py")
 ds = _load("ds_test_plugin", "__init__.py")
 
 TOKENS_CSS = (FIX / "ds" / "tokens.css").read_text()
+# The same DS, but shipping the #525 radius scale and #547 spacing half-steps.
+TOKENS_CSS_SCALES = (FIX / "ds_scales" / "tokens.css").read_text()
 
 
 @pytest.fixture(scope="module")
 def V():
     return vocab.build_vocab(TOKENS_CSS)
+
+
+@pytest.fixture(scope="module")
+def VS():
+    return vocab.build_vocab(TOKENS_CSS_SCALES)
 
 
 def _run(code: str, filename: str, V, inventory=None, rules=None):
@@ -245,6 +252,151 @@ def test_a_lone_token_is_not_a_scale_so_its_value_goes_to_the_gap(V):
     f, ctx = _run(".a { border-radius: 4px; } .b { border-radius: 999px; } .c { border-radius: 50%; } .d { font-size: 14px; }", "a.css", V)
     assert f == []
     assert [o["value"] for o in ctx.missing["radius"]] == ["4px"] and [o["value"] for o in ctx.missing["font-size"]] == ["14px"]
+
+
+# ── #525 radius scale + #547 spacing half-steps (the ds_scales fixture) ─────────
+
+
+def test_ds_scales_vocab_ships_the_radius_and_half_step_scales(VS):
+    assert [px for _, px in VS.scale("space")] == [2, 4, 6, 8, 10, 12, 16]
+    assert [px for _, px in VS.scale("radius")] == [4, 6, 8, 12, 999]
+    assert VS.is_known("--pl-space-1_5") and VS.is_known("--pl-radius-pill")   # `_` names parse now
+    assert "radius" not in VS.missing_scales()                                 # the scale exists → not a DS gap
+    assert VS.missing_scales() == ["font-size"]
+
+
+def test_on_scale_spacing_produces_no_finding(VS):
+    # 2/6/10px are real steps now → on-scale, nothing to fix (r1).
+    f, ctx = _run(".a { gap: 6px; } .b { padding: 10px 2px; }", "a.css", VS)
+    assert [x for x in f if x["rule"] == "off-scale-length"] == []
+    assert ctx.off_scale == {}                                                 # nothing pending a scale-gap
+
+
+def test_ruled_out_spacing_snaps_to_both_neighbours(VS):
+    f, ctx = _run(".a { gap: 7px; }", "a.css", VS)
+    off = [x for x in f if x["rule"] == "off-scale-length"]
+    assert len(off) == 1 and off[0]["severity"] == "warn"
+    assert "ruled out" in off[0]["message"]
+    assert "var(--pl-space-1_5)" in off[0]["message"] and "var(--pl-space-2)" in off[0]["message"]
+    assert off[0]["suggestion"] == "use var(--pl-space-1_5)"                   # 7px ties → the smaller step
+    assert ctx.off_scale == {}                                                 # decided → never a scale-gap
+
+
+@pytest.mark.parametrize("val,lower,upper", [
+    ("3px", "--pl-space-0_5", "--pl-space-1"),
+    ("5px", "--pl-space-1", "--pl-space-1_5"),
+    ("9px", "--pl-space-2", "--pl-space-2_5"),
+    ("14px", "--pl-space-3", "--pl-space-4"),   # 12→16 is a 4px gap: still a decided snap
+])
+def test_every_ruled_out_half_step_names_its_neighbours(VS, val, lower, upper):
+    f, ctx = _run(f".a {{ gap: {val}; }}", "a.css", VS)
+    off = [x for x in f if x["rule"] == "off-scale-length"]
+    assert len(off) == 1 and off[0]["severity"] == "warn"
+    assert f"var({lower})" in off[0]["message"] and f"var({upper})" in off[0]["message"]
+    assert ctx.off_scale == {}
+
+
+def test_ruled_out_snap_never_becomes_a_scale_gap_even_when_recurring(VS):
+    code = "\n".join(f".g{i} {{ gap: 7px; }}" for i in range(12))    # ≥ SCALE_GAP_MIN_USES
+    ctx = audit.AuditContext()
+    fs = audit.audit_text(code, "a.css", VS, ctx=ctx)
+    allf, _ = audit.finalize(fs, ctx, VS)
+    assert [f for f in allf if f["rule"] == "scale-gap"] == []       # the DS ruled it out; not a gap
+    assert all(x["severity"] == "warn" for x in fs if x["rule"] == "off-scale-length")
+
+
+def test_wide_spacing_gap_stays_info_and_a_scale_gap_candidate(VS):
+    f, ctx = _run(".a { gap: 40px; }", "a.css", VS)
+    off = [x for x in f if x["rule"] == "off-scale-length"]
+    assert len(off) == 1 and off[0]["severity"] == "info"           # 16→(nothing) is a real gap, not a snap
+    assert ctx.off_scale.get("space")                               # feeds scale-gap
+
+
+def test_ruled_out_snaps_lower_the_consumer_score(VS):
+    # A decided snap is a warn and now counts against the consumer, unlike an undecided off-scale info.
+    ctx = audit.AuditContext()
+    ctx.token_refs = 9
+    fs = audit.audit_text(".a { gap: 7px; }", "a.css", VS, ctx=ctx)
+    allf, _ = audit.finalize(fs, ctx, VS)
+    assert audit.score(allf, ctx) == 90                             # 9 / (9 + 1)
+
+
+@pytest.mark.parametrize("val,expect", [
+    ("5px", "var(--pl-radius)"),        # 4/6 tie → the smaller step
+    ("10px", "var(--pl-radius-lg)"),    # 8/12 tie → the smaller step
+    ("999px", "var(--pl-radius-pill)"), # exact pill
+    ("100px", "var(--pl-radius-pill)"), # ≥ 100px → pill
+])
+def test_off_token_radius_snaps_to_nearest_step_never_a_gap(VS, val, expect):
+    f, ctx = _run(f".a {{ border-radius: {val}; }}", "a.css", VS)
+    off = [x for x in f if x["rule"] == "off-scale-length"]
+    assert len(off) == 1 and off[0]["severity"] == "warn"
+    assert expect in off[0]["suggestion"]
+    assert ctx.off_scale == {}                                      # radius is decided → never a scale-gap
+
+
+def test_radius_tie_lists_both_neighbours(VS):
+    off = [x for x in _run(".a { border-radius: 7px; }", "a.css", VS)[0] if x["rule"] == "off-scale-length"][0]
+    assert "var(--pl-radius-md)" in off["message"] and "var(--pl-radius-lg)" in off["message"]
+    assert off["suggestion"] == "use var(--pl-radius-md)"           # tie → the smaller step
+
+
+def test_circle_radius_is_left_alone(VS):
+    f, _ = _run(".a { border-radius: 50%; }", "a.css", VS)
+    assert [x for x in f if x["rule"] == "off-scale-length"] == []
+
+
+def test_radius_with_a_scale_is_never_a_missing_scale(VS):
+    ctx = audit.AuditContext()
+    fs = audit.audit_text(".a { border-radius: 5px; }", "a.css", VS, ctx=ctx)
+    allf, _ = audit.finalize(fs, ctx, VS)
+    assert [f for f in allf if f["rule"] == "missing-scale"] == []
+    assert "radius" not in ctx.missing
+
+
+# A radius scale whose every step is finite — no pill token (< 999px throughout).
+_RADIUS_NO_PILL_CSS = """:root {
+  --pl-radius: 4px;
+  --pl-radius-md: 6px;
+  --pl-radius-lg: 8px;
+  --pl-radius-xl: 12px;
+}"""
+
+
+def test_radius_scale_without_a_pill_step_leaves_huge_radii_alone():
+    # #525 regression: a pill literal (≥999px) has no pill step to snap onto here, so it must be left
+    # alone — never warned down to the largest finite step (that turns a pill into a small corner).
+    v = vocab.build_vocab(_RADIUS_NO_PILL_CSS)
+    assert v.has_scale("radius") and not any(px >= 999 for _, px in v.scale("radius"))
+    f, ctx = _run(".a { border-radius: 9999px; } .b { border-radius: 999px; }", "a.css", v)
+    assert [x for x in f if x["rule"] == "off-scale-length"] == []   # no pill step → not snapped
+    assert ctx.off_scale == {}
+    # an ordinary off-token radius still snaps to the nearest finite step (the scale is decided).
+    g, _ = _run(".c { border-radius: 5px; }", "a.css", v)
+    off = [x for x in g if x["rule"] == "off-scale-length"]
+    assert len(off) == 1 and off[0]["severity"] == "warn" and "var(--pl-radius)" in off[0]["suggestion"]
+
+
+# A COARSE spacing scale (4/8/12/16, min step 4px) carrying an alias that duplicates one step's px.
+_COARSE_ALIAS_CSS = """:root {
+  --pl-space-1: 4px;
+  --pl-space-2: 8px;
+  --pl-gap-sm: var(--pl-space-2);
+  --pl-space-3: 12px;
+  --pl-space-4: 16px;
+}"""
+
+
+def test_duplicate_step_px_does_not_mark_a_coarse_scale_decided():
+    # #547 regression: gaps are measured between DISTINCT step values. Two tokens at the same px
+    # (--pl-gap-sm → --pl-space-2) must not manufacture a 0-wide gap that marks this coarse scale as
+    # "decided". 7px stays an undecided off-scale info + scale-gap candidate, not a ruled-out warn.
+    v = vocab.build_vocab(_COARSE_ALIAS_CSS)
+    assert sorted({px for _, px in v.scale("space")}) == [4, 8, 12, 16]     # distinct steps, 4px apart
+    f, ctx = _run(".a { gap: 7px; }", "a.css", v)
+    off = [x for x in f if x["rule"] == "off-scale-length"]
+    assert len(off) == 1 and off[0]["severity"] == "info"                   # coarse → not decided
+    assert ctx.off_scale.get("space")                                       # feeds scale-gap
 
 
 def test_box_shadow_owns_its_colors(V):

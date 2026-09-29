@@ -423,6 +423,13 @@ _URL_RE = re.compile(r"url\(|data:[a-z]+/[\w.+-]+[;,]", re.IGNORECASE)
 
 _SPACE_PROPS = re.compile(r"^(gap|row-gap|column-gap|margin|margin-(top|right|bottom|left|block|inline|block-start|block-end|inline-start|inline-end)|padding|padding-(top|right|bottom|left|block|inline|block-start|block-end|inline-start|inline-end))$")
 _RADIUS_PROPS = re.compile(r"^border(-(top|bottom|start|end)-(left|right|start|end))?-radius$")
+# A DECIDED (fine-grained) spacing scale ships half-steps, so a value bracketed by two steps this
+# close apart is a snap the DS already ruled on (#547), not a scale question. A coarse scale whose
+# natural step IS this wide keeps today's off-scale/scale-gap behaviour (see ``_judge_length``).
+_RULED_OUT_GAP = 4.0
+# A literal border-radius at or above this is a pill: snap it to the pill token when the scale ships
+# one, rather than snapping it to the largest finite step (#525).
+_PILL_RADIUS_PX = 100.0
 _JS_STYLE_PROPS = re.compile(
     r"(?<![\w$.-])(fontSize|borderRadius|border(?:Top|Bottom)(?:Left|Right)Radius|gap|rowGap|columnGap|margin(?:Top|Right|Bottom|Left|Block|Inline)?|padding(?:Top|Right|Bottom|Left|Block|Inline)?|boxShadow|color|backgroundColor|background|borderColor|fill|stroke|outlineColor)\s*:\s*"
 )
@@ -865,33 +872,90 @@ class _FileScan:
                     continue
                 if kind == "space" and abs(px) <= 1:
                     continue  # hairline nudges aren't spacing decisions
-                if kind == "radius" and (abs(px) >= 999 or tok.endswith("%")):
-                    continue  # pill / circle
+                if kind == "radius":
+                    if tok.endswith("%"):
+                        continue  # circle
+                    if abs(px) >= 999 and not any(p >= 999 for _n, p in self.vocab.scale("radius")):
+                        continue  # ≥999px with no pill step to snap onto — a bare pill/circle, leave it (as before)
                 off = vs + toff
                 self._judge_length(kind, prop, tok, px, off)
 
     def _judge_length(self, kind: str, prop: str, tok: str, px: float, off: int) -> None:
         v = self.vocab
+        if kind == "radius" and v.has_scale("radius"):
+            # The radius scale (#525) is a DECIDED scale, pill and all: an off-token radius is a
+            # consumer snap-to-nearest, never a DS scale-gap. (A lone radius token has no scale and
+            # still falls to the missing-scale gap below.)
+            self._judge_radius(prop, tok, px, off)
+            return
         near = v.nearest_length(kind, px)
         if not v.has_scale(kind):
             # One token is a value, not a scale: "font-size: 14px → use --pl-font-base-size" is
             # odd advice when 12/13/11px have nowhere to go. It all belongs to the DS gap.
             self.ctx.missing.setdefault(kind, []).append({"file": self.filename, "line": self.lines.pos(off)[0], "value": tok, "prop": prop, "px": px})
             return
+        entries = sorted({(p, n) for n, p in v.scale(kind)})
+        # Gaps are measured between DISTINCT step values, not (px, name) pairs: two tokens at the
+        # same px (e.g. an alias --pl-gap-sm → --pl-space-2) must not manufacture a 0-wide gap that
+        # would wrongly mark a coarse scale as "decided".
+        pxs = sorted({p for _n, p in v.scale(kind)})
+        gaps = [b - a for a, b in zip(pxs, pxs[1:])]
+        # A DECIDED spacing scale ships a step finer than its base (a half-step). In it an on-token
+        # literal is simply on-scale (nothing to fix) and an off-token value bracketed by two steps
+        # ≤ 4px apart is a snap the DS ruled on (#547), not a scale question. A coarse scale whose
+        # natural step is that wide keeps today's exact-nudge / off-scale / scale-gap behaviour.
+        decided = kind == "space" and bool(gaps) and min(gaps) < _RULED_OUT_GAP
         if near and near[2] == 0:
+            if decided:
+                return  # on-scale in a decided scale — a real step, no finding
             self.add(_mk("off-scale-length", "warn", self.filename, self.lines, off,
                          f"hardcoded {prop}: {tok} is exactly {v.ref(near[0])}",
                          f"use {v.ref(near[0])}", group=f"{kind}: {tok} → {near[0]}", value_px=px, scale=kind))
             return
-        self.ctx.off_scale.setdefault(kind, []).append({"file": self.filename, "line": self.lines.pos(off)[0], "value": tok, "prop": prop, "px": px})
-        entries = sorted({(p, n) for n, p in v.scale(kind)})
         below = [e for e in entries if e[0] <= abs(px)]
         above = [e for e in entries if e[0] >= abs(px)]
+        if decided and below and above and (above[0][0] - below[-1][0]) <= _RULED_OUT_GAP:
+            lo_p, lo_n = below[-1]
+            hi_p, hi_n = above[0]
+            target = lo_n if (abs(px) - lo_p) <= (hi_p - abs(px)) else hi_n   # ties → the smaller step
+            self.add(_mk("off-scale-length", "warn", self.filename, self.lines, off,
+                         f"{prop}: {tok} is ruled out by the spacing scale; snap to {v.ref(lo_n)} or {v.ref(hi_n)} (nearest {v.ref(target)})",
+                         f"use {v.ref(target)}", group=f"{kind}: {tok}", value_px=px, scale=kind))
+            return
+        self.ctx.off_scale.setdefault(kind, []).append({"file": self.filename, "line": self.lines.pos(off)[0], "value": tok, "prop": prop, "px": px})
         around = " / ".join(f"{n}={p:g}px" for p, n in ([below[-1]] if below else []) + ([above[0]] if above else []))
         self.add(_mk("off-scale-length", "info", self.filename, self.lines, off,
                      f"{prop}: {tok} is off the {vocab_mod.SCALE_LABEL[kind]} scale (between {around})",
                      f"snap to {v.ref(near[0])}" if near else "use a scale token",
                      group=f"{kind}: {tok}", value_px=px, scale=kind))
+
+    def _judge_radius(self, prop: str, tok: str, px: float, off: int) -> None:
+        """The radius scale (#525) is decided, so every off-token radius is a consumer
+        snap-to-nearest at ``warn`` and never feeds ``ctx.off_scale`` (no scale-gap). A literal that
+        equals a token is an exact match; one ≥ 100px is a pill; every other value names its nearest
+        step, breaking ties toward the smaller step (5px → --pl-radius, 7px names both md and lg)."""
+        v = self.vocab
+        apx = abs(px)
+        scale = v.scale("radius")
+        pill = next((n for n, p in scale if p >= 999), None)
+        exact = next((n for n, p in scale if p == apx), None)
+        if exact is not None:
+            self.add(_mk("off-scale-length", "warn", self.filename, self.lines, off,
+                         f"hardcoded {prop}: {tok} is exactly {v.ref(exact)}",
+                         f"use {v.ref(exact)}", group=f"radius: {tok} → {exact}", value_px=px, scale="radius"))
+            return
+        if pill and apx >= _PILL_RADIUS_PX:
+            self.add(_mk("off-scale-length", "warn", self.filename, self.lines, off,
+                         f"{prop}: {tok} is a pill radius — snap to {v.ref(pill)}",
+                         f"use {v.ref(pill)}", group=f"radius: {tok} → {pill}", value_px=px, scale="radius"))
+            return
+        steps = sorted({(p, n) for n, p in scale if p < 999})   # ascending px → the smaller step first
+        best = min(abs(apx - p) for p, _ in steps)
+        near = [n for p, n in steps if abs(abs(apx - p) - best) < 1e-6]
+        named = " or ".join(v.ref(n) for n in near)
+        self.add(_mk("off-scale-length", "warn", self.filename, self.lines, off,
+                     f"{prop}: {tok} is off the border-radius scale — snap to the nearest step {named}",
+                     f"use {v.ref(near[0])}", group=f"radius: {tok}", value_px=px, scale="radius"))
 
     def _judge_shadow(self, val: str, off: int) -> None:
         v = self.vocab
@@ -1248,14 +1312,15 @@ SCALE_GAP_MIN_FILES = 3
 SCORE_FORMULA = (
     "score = 100 × good / (good + penalty), where good = valid var(--pl-*) references + names "
     "imported from the DS packages, and penalty = Σ over consumer finding groups of "
-    "min(10, Σ weights) with error 3, warn 1, info 0.25 (off-scale info 0 — that's the DS's "
-    "scale-gap). DS-lane findings don't lower the score — they're the design system's to fix."
+    "min(10, Σ weights) with error 3, warn 1, info 0.25. Only an UNDECIDED off-scale value weighs "
+    "0 — the off-scale-length info that's really a DS scale-gap; a value the DS already ruled on "
+    "(a snap to a decided step) is a warn and counts. DS-lane findings don't lower the score."
 )
 
 
 def _weight(f: dict) -> float:
     if f.get("rule") == "off-scale-length" and f.get("severity") == "info":
-        return 0.0  # an off-scale value is a question for the DS scale (scale-gap), not a consumer defect
+        return 0.0  # only an UNDECIDED off-scale value weighs 0 — it's a question for the DS scale (scale-gap); a decided snap is a warn and counts against the consumer
     return SEVERITY_WEIGHT.get(f.get("severity", "warn"), 1.0)
 
 
