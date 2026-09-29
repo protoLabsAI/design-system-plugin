@@ -32,6 +32,8 @@ sp = _load("ds_test_siteprobe", "siteprobe.py")
 ds = _load("ds_test_plugin_site", "__init__.py")
 
 TOKENS_CSS = (FIX / "ds" / "tokens.css").read_text()
+# The same DS, but shipping the #525 radius scale and #547 spacing half-steps (the ds-n8t fixture).
+TOKENS_CSS_SCALES = (FIX / "ds_scales" / "tokens.css").read_text()
 DS_PROBE = (FIX / "probes" / "ds_app.json").read_text()
 FOREIGN_PROBE = (FIX / "probes" / "foreign_marketing.json").read_text()
 INVENTORY = ["Button", "Card", "Badge", "Tabs", "Input", "Row", "Avatar", "Heading", "Header", "Navigation", "TextLink", "ToastProvider", "Hero", "FormField"]
@@ -45,6 +47,11 @@ STORYBOOK = [
 @pytest.fixture(scope="module")
 def V():
     return sp.vocab_mod.build_vocab(TOKENS_CSS)
+
+
+@pytest.fixture(scope="module")
+def VS():
+    return sp.vocab_mod.build_vocab(TOKENS_CSS_SCALES)
 
 
 def _probe(text=DS_PROBE):
@@ -156,6 +163,85 @@ def test_audit_probe_on_a_site_that_does_not_use_the_ds(V):
 def test_audit_probe_rules_filter(V):
     findings, _ = sp.audit_probe(_probe(), V, rules=["low-contrast"])
     assert _rules(findings) == {"low-contrast"}
+
+
+# ── rendered length checks against the #525/#547 scales (mirrors audit.py, ds-1d1) ──
+
+
+def _length_probe(spacing=None, radii=None, url="https://scales.example/"):
+    """A hand-built probe carrying only the length rows under test — no colors, vars or clusters."""
+    styles = {}
+    if spacing is not None:
+        styles["spacing"] = spacing
+    if radii is not None:
+        styles["radii"] = radii
+    return {"url": url, "pages": [url], "styles": styles}
+
+
+def _spacing(px, n=5):
+    return {"v": f"{px:g}px", "n": n, "ex": [".el"], "props": {"gap": n}}
+
+
+def _radius(v, n=5):
+    return {"v": v, "n": n, "ex": [".el"]}
+
+
+def _off(findings):
+    return [f for f in findings if f["rule"] == "off-scale-length"]
+
+
+def test_rendered_on_scale_spacing_is_good_and_silent(VS):
+    # 6/10/2px are real steps in the #547 half-step scale → good lengths, no finding (r1).
+    probe = _length_probe(spacing=[_spacing(6), _spacing(10), _spacing(2)])
+    findings, stats = sp.audit_probe(probe, VS)
+    assert _off(findings) == []
+    assert stats["good_lengths"] == 3 and stats["lengths_checked"] == 3
+
+
+def test_rendered_ruled_out_spacing_snaps_to_both_neighbours(VS):
+    # 7px is bracketed by 6/8px (≤4px apart) → a decided snap warn naming both, never a scale-gap (r2).
+    probe = _length_probe(spacing=[_spacing(7, n=6)])
+    findings, _ = sp.audit_probe(probe, VS)
+    off = _off(findings)
+    assert len(off) == 1 and off[0]["severity"] == "warn"
+    assert "ruled out" in off[0]["message"]
+    assert "var(--pl-space-1_5)" in off[0]["message"] and "var(--pl-space-2)" in off[0]["message"]
+    assert off[0]["suggestion"] == "use var(--pl-space-1_5)"   # 7px ties → the smaller step
+    assert "(×6)" in off[0]["message"]                          # the (×n) count survives
+    assert "scale-gap" not in _rules(findings)
+
+
+def test_rendered_wide_gap_spacing_keeps_todays_off_scale_behaviour(VS):
+    # 40px sits above the top step (16px) with no bracketing pair ≤4px apart → today's off-scale info.
+    probe = _length_probe(spacing=[_spacing(40, n=4)])
+    off = _off(sp.audit_probe(probe, VS)[0])
+    assert len(off) == 1 and off[0]["severity"] == "info"
+    assert "off the spacing scale" in off[0]["message"] and "ruled out" not in off[0]["message"]
+
+
+def test_rendered_off_token_radius_snaps_to_nearest(VS):
+    # 5px is off the radius scale → a warn snapping to var(--pl-radius) (4/6 tie → the smaller step, r3).
+    off = _off(sp.audit_probe(_length_probe(radii=[_radius("5px", n=4)]), VS)[0])
+    assert len(off) == 1 and off[0]["severity"] == "warn"
+    assert off[0]["suggestion"] == "use var(--pl-radius)"
+    assert "var(--pl-radius)" in off[0]["message"] and "(×4)" in off[0]["message"]
+
+
+def test_rendered_pill_radius_is_good_and_100px_snaps_to_the_pill(VS):
+    # 999px equals the pill token → good; 100px is a pill → snap to var(--pl-radius-pill) (r3).
+    probe = _length_probe(radii=[_radius("999px", n=3), _radius("100px", n=2)])
+    findings, stats = sp.audit_probe(probe, VS)
+    off = _off(findings)
+    assert len(off) == 1 and off[0]["severity"] == "warn" and off[0]["value_px"] == 100
+    assert "var(--pl-radius-pill)" in off[0]["message"]
+    assert off[0]["suggestion"] == "use var(--pl-radius-pill)"
+    assert stats["good_lengths"] == 1                          # only the 999px pill counted as good
+
+
+def test_rendered_percentage_radius_is_ignored(VS):
+    # 50% isn't an absolute length → no length check, no finding (r3).
+    findings, stats = sp.audit_probe(_length_probe(radii=[_radius("50%", n=9)]), VS)
+    assert _off(findings) == [] and stats["lengths_checked"] == 0
 
 
 def test_contrast_and_background_compositing():
