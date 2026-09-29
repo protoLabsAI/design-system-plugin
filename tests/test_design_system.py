@@ -87,6 +87,8 @@ def test_ds_check_needs_input():
 
 
 def test_ds_components_lists_inventory(monkeypatch):
+    monkeypatch.setattr(ds, "_EXP_CACHE", None)
+    monkeypatch.setattr(ds, "_gh_get_raw", lambda path: "")
     monkeypatch.setattr(ds, "_gh_list", lambda path: [
         {"name": "Button.stories.tsx"}, {"name": "AppShell.stories.tsx"}, {"name": "README.md"},
     ])
@@ -447,6 +449,7 @@ def _sb(monkeypatch):
     """Serve the fixture index in place of the network, cache cleared."""
     monkeypatch.setattr(ds, "_SB_CACHE", None, raising=False)
     monkeypatch.setattr(ds, "_sb_components", lambda force=False: sb.parse_index(_INDEX))
+    monkeypatch.setattr(ds, "_export_index", lambda force=False: [])  # no network for the export half
     return ds
 
 
@@ -1135,3 +1138,203 @@ def test_parse_css_light_media_survives_minified_and_reindented():
     assert th_re["dark"]["--pl-color-bg"] == "#0a0a0c"
     assert th_re["light"]["--pl-color-bg"] == "#f6f7f9"
     assert th_re["light"]["--pl-color-fg"] == "#18181b"
+
+
+# ── component index: every public export by name (#28) ───────────────────────
+
+_PKG_FILES = {
+    "packages/ui/package.json": json.dumps({
+        "name": "@protolabsai/ui",
+        "exports": {
+            "./primitives": "./src/primitives.tsx",
+            "./overlays": "./src/overlays.tsx",
+            "./app-shell": "./src/app-shell.tsx",
+            "./command-palette": "./src/command-palette.tsx",
+            "./styles.css": "./src/styles.css",
+            "./browser": "./dist/ui.esm.js",
+        },
+    }),
+    "packages/ui/src/primitives.tsx": """import { cx } from "./internal";
+export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  /** Visual weight. */
+  variant?: "default" | "primary";
+};
+export function Button({ variant = "default", ...rest }: ButtonProps) {
+  return <button className={cx("pl-btn", variant)} {...rest} />;
+}
+""",
+    "packages/ui/src/overlays.tsx": """/** Modal dialog — scrim + centered card. */
+export function Dialog({
+  open,
+  onClose,
+  title,
+}: {
+  open: boolean;
+  onClose?: () => void;
+  /** Heading text. */
+  title?: ReactNode;
+}) {
+  return open ? <div className="pl-dialog">{title}</div> : null;
+}
+
+export type ToastPosition = "top-right" | "bottom-right";
+
+/** Wrap the app once. Exposes `useToast()`. */
+export function ToastProvider({ children, position = "bottom-right" }: { children: ReactNode; position?: ToastPosition }) {
+  return <div className="pl-toast-stack">{children}</div>;
+}
+
+/** Returns `toast(opts)`. */
+export function useToast() {
+  return useContext(ToastContext);
+}
+""",
+    "packages/ui/src/app-shell.tsx": """export type MobileItem = { id: string; label: string };
+
+/** Mobile shell: a bottom quick-bar + a More drawer. */
+export function MobileNav({
+  items,
+  quickBarIds,
+  moreTab = true,
+}: {
+  items: MobileItem[];
+  /** Surfaces pinned to the bottom bar. */
+  quickBarIds: string[];
+  moreTab?: boolean;
+}) {
+  return <nav className="pl-mobilenav" />;
+}
+
+export function AppShell({ children }: { children: ReactNode }) {
+  return <div className="pl-appshell">{children}</div>;
+}
+""",
+    "packages/ui/src/command-palette.tsx": """export type CommandPaletteProps = {
+  open: boolean;
+  /** overlay (default) or inline. */
+  presentation?: "overlay" | "inline";
+};
+
+/** The command palette. */
+export function CommandPalette({ open, presentation = "overlay" }: CommandPaletteProps) {
+  return null;
+}
+export { commandsView } from "./command-palette.views";
+""",
+    "packages/ui/src/command-palette.views.tsx": """/** The root view. */
+export function commandsView(config: { title?: string }) {
+  return { id: "commands" };
+}
+""",
+    "packages/ui/src/internal.ts": "export function cx(...a) { return a.join(' '); }\nexport function InternalThing() {}\n",
+    "packages/ui/src/Overlays.stories.tsx": """import { Dialog, ToastProvider } from "./overlays";
+export const Modal = {
+  render: () => (
+    <Dialog open title="Rename workflow" onClose={() => {}} />
+  ),
+};
+""",
+    "packages/ui/src/AppShell.full.stories.tsx": """import { MobileNav } from "./app-shell";
+export const Mobile = {
+  render: () => <MobileNav items={[]} quickBarIds={["chat"]} />,
+};
+""",
+    "packages/ui/src/CommandPalette.stories.tsx": "export const Playground = { render: () => <CommandPalette open /> };\n",
+}
+
+
+@pytest.fixture
+def ds_repo(monkeypatch):
+    """A tiny packages/ui served through the two fetch seams, caches cleared."""
+    fetched: list[str] = []
+
+    def raw(path):
+        fetched.append(path)
+        if path not in _PKG_FILES:
+            raise RuntimeError(f"could not fetch {path} (HTTPStatusError)")
+        return _PKG_FILES[path]
+
+    def listing(path):
+        pre = path.rstrip("/") + "/"
+        return [{"name": p[len(pre):], "type": "file"} for p in _PKG_FILES if p.startswith(pre) and "/" not in p[len(pre):]]
+    monkeypatch.setattr(ds, "_gh_get_raw", raw)
+    monkeypatch.setattr(ds, "_gh_list", listing)
+    monkeypatch.setattr(ds, "_EXP_CACHE", None)
+    monkeypatch.setattr(ds, "_INV_CACHE", None)
+    monkeypatch.setattr(ds, "_sb_components", lambda force=False: [])
+    monkeypatch.setattr(ds, "_token_sections", lambda: [])
+    return fetched
+
+
+def test_export_index_covers_every_public_export_and_only_those(ds_repo):
+    idx = {e["name"]: e for e in ds._export_index()}
+    for name in ("Button", "Dialog", "ToastProvider", "useToast", "MobileNav", "AppShell", "CommandPalette", "commandsView"):
+        assert name in idx, name
+    assert idx["MobileNav"]["import"] == "@protolabsai/ui/app-shell" and idx["MobileNav"]["kind"] == "component"
+    assert idx["useToast"]["kind"] == "hook" and idx["ButtonProps"]["kind"] == "type"
+    assert idx["commandsView"]["def_file"] == "command-palette.views.tsx"  # followed the re-export
+    assert "InternalThing" not in idx and "cx" not in idx                  # internal.ts isn't public
+
+
+def test_ds_component_finds_a_component_exported_from_a_differently_named_module(ds_repo):
+    out = _call(ds.ds_component, name="MobileNav")
+    assert 'import { MobileNav } from "@protolabsai/ui/app-shell";' in out
+    assert "quickBarIds: string[];" in out and "Surfaces pinned to the bottom bar" in out   # props + their docs
+    assert "export type MobileItem" in out                                                   # the referenced type
+    assert "AppShell.full.stories.tsx" in out and "<MobileNav items" in out                  # a real usage
+
+
+def test_ds_component_reads_a_group_story_component_from_source(ds_repo):
+    out = _call(ds.ds_component, name="dialog")          # case-insensitive
+    assert 'from "@protolabsai/ui/overlays"' in out and "onClose?: () => void;" in out
+    assert "Modal dialog" in out and '<Dialog open title="Rename workflow"' in out
+
+
+def test_ds_component_includes_the_named_props_type(ds_repo):
+    out = _call(ds.ds_component, name="CommandPalette")
+    assert "export function CommandPalette(" in out and "export type CommandPaletteProps" in out
+    assert 'presentation?: "overlay" | "inline";' in out
+
+
+def test_ds_component_partial_name_lists_the_closest_exports(ds_repo):
+    out = _call(ds.ds_component, name="Toast")
+    assert "No export is named exactly 'Toast'" in out
+    assert "## ToastProvider (component)" in out and "## useToast (hook)" in out
+    assert "position?: ToastPosition" in out
+
+
+def test_ds_component_falls_back_to_a_story_group(ds_repo):
+    out = _call(ds.ds_component, name="Overlays")
+    assert out.startswith("Overlays.stories.tsx:") and "Rename workflow" in out
+    assert "no public export or story" in _call(ds.ds_component, name="DatePicker")
+
+
+def test_ds_search_finds_exports_by_name(ds_repo):
+    for q, want in (("MobileNav", "EXPORT MobileNav (component)"), ("CommandPalette", "EXPORT CommandPalette (component)"),
+                    ("toast", "EXPORT ToastProvider (component)")):
+        out = _call(ds.ds_search, query=q)
+        assert want in out, (q, out)
+    assert "import type { ButtonProps }" in _call(ds.ds_search, query="buttonprops")
+    assert "No component, variant or token matches" in _call(ds.ds_search, query="datepicker")
+
+
+def test_ds_components_lists_public_exports_by_module(ds_repo):
+    out = _call(ds.ds_components)
+    assert "- @protolabsai/ui/app-shell: AppShell, MobileNav" in out
+    assert "- @protolabsai/ui/overlays: Dialog, ToastProvider, useToast" in out
+    assert "- CommandPalette" in out                     # the story files still listed
+
+
+def test_inventory_uses_the_public_components(ds_repo):
+    inv = ds._inventory(force=True)
+    assert {"MobileNav", "Dialog", "CommandPalette", "Button"} <= set(inv)
+    assert "Overlays" not in inv and "InternalThing" not in inv and "useToast" not in inv
+
+
+def test_export_index_without_package_json_reads_every_source_module(ds_repo, monkeypatch):
+    files = {k: v for k, v in _PKG_FILES.items() if not k.endswith("package.json")}
+    monkeypatch.setattr(ds, "_gh_get_raw", lambda p: files[p] if p in files else (_ for _ in ()).throw(RuntimeError("404")))
+    idx = {e["name"]: e for e in ds._export_index(force=True)}
+    assert "MobileNav" in idx and idx["MobileNav"]["import"] == ""
+    assert "InternalThing" not in idx
+    assert "(exported by app-shell.tsx)" in _call(ds.ds_component, name="MobileNav")

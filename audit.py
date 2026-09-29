@@ -31,7 +31,7 @@ consumer lane
   legacy-alias         app custom properties that re-declare a DS token's value (--brand-indigo)
   hand-rolled-control  raw <button>/<input>/<select>/<textarea>/<dialog> when the DS ships one
                        (a composite <button>: class + >=2 element children is exempt — protoContent#551)
-  shadow-component     a local component named like (or as a family of) a DS component
+  shadow-component     a local component that re-implements a DS one (same name, or its root class) without using it
   foreign-ui-lib       imports of competing UI kits (MUI, Chakra, antd, shadcn, raw Radix, Bootstrap…)
 ds lane (aggregated across everything scanned)
   missing-scale        hardcoded values for a property the DS has NO token scale for — one finding
@@ -1021,51 +1021,86 @@ class _FileScan:
                          f"use <{comp}> from the DS so focus, states and theming come for free",
                          group=f"<{m.group(1)}> → {comp}", component=comp))
 
+    def _uses_ds(self, ds: str, imported: set[str]) -> bool:
+        """Does this file COMPOSE the DS component ``ds``? It imports it (or a DS relative
+        that embeds its name: ConfirmDialog for Dialog) from the DS package, or renders it
+        (``<Surface``, ``<UI.Surface``) — a DS component reached through a local barrel is still
+        the DS component."""
+        if any(ds in name for name in imported):
+            return True
+        return re.search(r"<(?:[A-Za-z_$][\w$]*\.)?" + re.escape(ds) + r"(?![\w$])", self.masked) is not None
+
+    def _root_class(self, ds: str, body: str) -> str | None:
+        """The DS component's ROOT class (``pl-surface`` / ``pl-mobilenav`` /
+        ``pl-mobile-nav``) written by hand in ``body`` — re-implementing its markup. A BEM
+        element or modifier (``pl-surface__head``, ``pl-surface--raised``) alone doesn't count:
+        restyling a part is ds-class-override's business, not a fork of the whole."""
+        pre = self.class_prefix[1:]
+        kebab = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", ds).lower()
+        for cls in dict.fromkeys((pre + kebab, pre + ds.lower())):
+            if re.search(r"(?<![\w-])" + re.escape(cls) + r"(?![\w-])", body):
+                return cls
+        return None
+
     def rule_shadow_components(self) -> None:
+        """A local component that re-implements a DS component instead of using it. The
+        evidence has to be real, because the common case — an app feature that COMPOSES DS
+        parts (ChatSurface, MetricGrid, CodeRefChip) — is exactly what the DS is for:
+
+        - its name IS the DS component's (StatusDot), or that name plus a generic affix
+          (CustomButton, BaseCard), and the file neither imports nor renders the DS one; or
+        - it is named for a DS family (*Surface, *Card) AND hand-writes that component's root
+          class (``pl-surface``) without importing or rendering the DS component.
+
+        A name that merely ends in a DS name is never flagged on its own, and a file that
+        imports/renders the DS component a local is named after is composing it — not flagged,
+        whatever the name."""
         inv = self.ctx.inventory
         if not inv:
             return
         by_lower = {n.lower(): n for n in inv}
         imported = self._ds_imported_names()
+        defs: list[tuple[int, str]] = []
         seen: set[str] = set()
         for rx in (_DEF_FUNC_RE, _DEF_CONST_RE, _DEF_CLASS_RE):
             for m in rx.finditer(self.masked):
-                local = m.group(1)
-                if local in seen:
+                if m.group(1) not in seen:
+                    seen.add(m.group(1))
+                    defs.append((m.start(1), m.group(1)))
+        defs.sort()
+        for i, (off, local) in enumerate(defs):
+            body = self.masked[off: defs[i + 1][0] if i + 1 < len(defs) else len(self.masked)]
+            if local.lower() in by_lower:
+                ds = by_lower[local.lower()]
+                # `import { Markdown as DSMarkdown }` + `function Markdown` is a wrapper, and so is
+                # a lazy import of a local module of the same name — neither is a fork here.
+                wraps_local = re.search(r"""(?:import\(\s*|\bfrom\s+)['"][^'"]*/""" + re.escape(local) + r"""['"]""", self.masked)
+                if ds in imported or wraps_local:
                     continue
-                seen.add(local)
-                off = m.start(1)
-                if local.lower() in by_lower:
-                    ds = by_lower[local.lower()]
-                    wraps_local = re.search(r"""(?:import\(\s*|\bfrom\s+)['"][^'"]*/""" + re.escape(local) + r"""['"]""", self.masked)
-                    if ds in imported or wraps_local:
-                        self.add(_mk("shadow-component", "info", self.filename, self.lines, off,
-                                     f"local {local} wraps the DS {ds} under the same name",
-                                     f"fine if it only adds app wiring — but a same-named wrapper hides which {ds} a reader is looking at; consider a distinct name",
-                                     group=ds, component=ds, local=local))
-                        continue
-                    self.add(_mk("shadow-component", "warn", self.filename, self.lines, off,
-                                 f"local component {local} duplicates the design system's {ds}",
-                                 f"import {ds} from the DS; if it lacks something, extend the DS component instead of forking it",
-                                 group=ds, component=ds, local=local))
-                    continue
-                stripped = _AFFIXES.sub("", local)
-                if stripped != local and stripped.lower() in by_lower and by_lower[stripped.lower()] not in imported:
-                    ds = by_lower[stripped.lower()]
+                self.add(_mk("shadow-component", "warn", self.filename, self.lines, off,
+                             f"local component {local} duplicates the design system's {ds}",
+                             f"import {ds} from the DS; if it lacks something, extend the DS component instead of forking it",
+                             group=ds, component=ds, local=local, evidence="same name"))
+                continue
+            stripped = _AFFIXES.sub("", local)
+            if stripped != local and stripped.lower() in by_lower:
+                ds = by_lower[stripped.lower()]
+                if not self._uses_ds(ds, imported):
                     self.add(_mk("shadow-component", "warn", self.filename, self.lines, off,
                                  f"local component {local} looks like a re-implementation of the DS's {ds}",
                                  f"use {ds} (compose or extend it) rather than a parallel copy",
-                                 group=ds, component=ds, local=local))
-                    continue
-                fam = [n for n in inv if len(n) >= 4 and local.endswith(n) and local != n]
-                if fam:
-                    ds = max(fam, key=len)
-                    if any(ds in name for name in imported):
-                        continue  # it composes the DS component (or a DS relative: ConfirmDialog) — the right move
-                    self.add(_mk("shadow-component", "info", self.filename, self.lines, off,
-                                 f"{local} is a local *{ds} variant that doesn't use the DS {ds}",
-                                 f"build it on the DS {ds} (a variant/prop), or propose the variant to the DS",
-                                 group=f"*{ds} family", component=ds, local=local))
+                                 group=ds, component=ds, local=local, evidence="same name + generic affix"))
+                continue
+            for ds in sorted((n for n in inv if len(n) >= 4 and local.endswith(n)), key=len, reverse=True):
+                if self._uses_ds(ds, imported):
+                    break  # composes the DS component — the right move
+                cls = self._root_class(ds, body)
+                if cls:
+                    self.add(_mk("shadow-component", "warn", self.filename, self.lines, off,
+                                 f"{local} re-implements the DS {ds} — it hand-writes {ds}'s root class `{cls}` instead of rendering <{ds}>",
+                                 f"render the DS {ds} (add a variant/prop to it if {local} needs one) rather than copying its markup",
+                                 group=ds, component=ds, local=local, evidence=f"root class {cls}"))
+                    break
 
     def rule_namespace_squat(self) -> None:
         """App definitions of ``--pl-*`` names the DS doesn't ship. They silence unknown-token
@@ -1406,7 +1441,11 @@ def render_markdown(findings: list[dict], summary: dict, title: str = "Design-sy
         for rule in rules:
             groups = grouped[rule]
             total = sum(len(g) for g in groups.values())
-            L += ["", f"### `{rule}` — {rules_reg[rule]['summary']} ({total})"]
+            # The count table is over EVERY finding; a capped reply (ds_audit_repo's max_findings)
+            # lists fewer. Say so, rather than printing two different numbers for one rule.
+            full = s["by_rule"].get(rule, total) if lane == "consumer" else total
+            count = f"{total}" if full == total else f"{total} of {full} shown — the report files hold all {full}"
+            L += ["", f"### `{rule}` — {rules_reg[rule]['summary']} ({count})"]
             ordered = sorted(groups.items(), key=lambda kv: -len(kv[1]))
             for key, items in ordered[:groups_per_rule]:
                 first = items[0]

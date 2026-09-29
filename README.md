@@ -19,12 +19,12 @@ from the repo at call time** — the anti-drift principle, as tools.
 | Tool | What it returns |
 |---|---|
 | `ds_tokens [section]` | the live token vocabulary — every `--pl-*` var with its dark and light value, read from the generated `tokens.css`; pass a section (`Color`, `Space`, …) to fetch one family |
-| `ds_components` | the component inventory from `packages/ui/src` (the story files) |
-| `ds_component <name>` | one component's story SOURCE — its API, props, usage |
+| `ds_components` | the component inventory from `packages/ui/src` — every public export grouped by the module you import it from, plus the story files |
+| `ds_component <name>` | one component's API by name — JSDoc + signature + props type read from the module that exports it (`MobileNav` → `@protolabsai/ui/app-shell`), a story usage excerpt; a partial name lists the closest exports (`Toast` → `ToastProvider`, `useToast`) |
 | `ds_stories` | the published Storybook inventory: every component and every variant name |
 | `ds_story <name>` | one component's variants, each with a **live render URL** you can show the user |
 | `ds_rules` | the visual-identity rules (when to use what, what we don't do) |
-| `ds_search <keyword>` | components, variants **and** tokens matching a keyword — the fastest "do we have a…" |
+| `ds_search <keyword>` | public exports, Storybook components/variants **and** tokens matching a keyword — the fastest "do we have a…" |
 | `ds_kit_classes` | the `.pl-*` classes the DS's published kit stylesheet actually defines — the vocabulary a no-build prototype can use |
 | `ds_check <code> [filename]` | lints a snippet with the audit engine (every rule below) → the token / component to use instead, with ΔE for near-miss colors |
 | `ds_audit_repo <path> [include] [exclude] [rules] [max_findings]` | audits a **local checkout** (or an onboarded `owner/repo`) for design-system adherence → a 0-100 score and a report split into **DS gaps** vs **consumer fixes**, written as `.md` + `.json` to the plugin data dir |
@@ -91,6 +91,10 @@ fetched CSS and computed styles:
   ≥ 2 distinct tokens; a DS with one radius token has a *value*, not a scale, and the auditor
   says so once instead of flagging every radius.
 - **`audit.py`** — the rules, the repo walker and the report renderers.
+- **`components.py`** — the component index behind `ds_component` / `ds_search` / the
+  shadow-component inventory: the package's `exports` map says which modules are public, each
+  module's `export` statements say what it ships (re-exports followed), and the API is read
+  from the source.
 
 | Rule | Lane | What it catches |
 |---|---|---|
@@ -101,7 +105,7 @@ fetched CSS and computed styles:
 | `ds-class-override` | consumer | app CSS whose selector **subject** is a DS class (`.x .pl-dialog__body {}`) — forking the component |
 | `legacy-alias` | consumer | app custom properties (`--brand-indigo: #6366f1`, or `var(--brand-indigo, #6366f1)`) duplicating a token's value |
 | `hand-rolled-control` | consumer | raw `<button>`/`<input>`/`<select>`/`<textarea>`/`<dialog>` in JSX when the DS ships the component (a composite `<button>` — a class **and** ≥2 element children, e.g. icon + label + meta — is exempt per protoContent#551) |
-| `shadow-component` | consumer | local components named like a DS component (`StatusDot`), or a `*Chip` family that doesn't use the DS one |
+| `shadow-component` | consumer | a local component that re-implements a DS one: the same name (`StatusDot`, or with a generic affix: `CustomCard`) without importing it, or a `*Surface`/`*Card` that hand-writes the DS root class (`pl-surface`) instead of rendering it. A component that imports or renders the DS component it's named after (`ChatSurface`, `MetricGrid`) is composition, never flagged |
 | `foreign-ui-lib` | consumer | imports of MUI, Chakra, antd, shadcn `@/components/ui`, raw `@radix-ui/*`, Bootstrap, … |
 | `namespace-squat` | consumer | the app defines `--pl-*` names the DS doesn't ship (silences `unknown-token`, collides later) |
 | `missing-scale` | **ds** | the DS has no scale for a property the app sets by hand — ONE finding with the value histogram |
@@ -336,7 +340,7 @@ operator_mcp_tools:
   - ds_search        # components, variants and tokens by keyword
   - ds_stories       # the published inventory
   - ds_story         # one component's variants + live preview URLs
-  - ds_component     # a component's story source (props, usage)
+  - ds_component     # a component's API from source (props, usage) — any public export
   - ds_tokens        # the --pl-* vocabulary (takes a section)
   - ds_kit_classes   # the no-build class vocabulary
   - ds_rules         # the visual-identity rules
