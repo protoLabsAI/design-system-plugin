@@ -1,0 +1,49 @@
+/* GENERATED — the ds/ fixture plus the #525 radius scale and #547 spacing half-steps. */
+:root {
+  color-scheme: dark;
+  --pl-color-bg: #0a0a0c;
+  --pl-color-fg: #ededed;
+  --pl-color-accent: #9b87f2;
+  --pl-color-brand-indigo: #6366f1;
+  --pl-color-border: rgba(255, 255, 255, 0.08);
+  --pl-color-status-error: oklch(0.64 0.16 25);
+  --pl-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --pl-shadow-popover: 0 8px 28px rgba(0, 0, 0, 0.5);
+  --pl-font-mono: "Geist Mono", ui-monospace, monospace;
+  --pl-font-base-size: 14px;
+  --pl-radius: 4px;
+  --pl-radius-md: 6px;
+  --pl-radius-lg: 8px;
+  --pl-radius-xl: 12px;
+  --pl-radius-pill: 999px;
+  --pl-space-0_5: 2px;
+  --pl-space-1: 4px;
+  --pl-space-1_5: 6px;
+  --pl-space-2: 8px;
+  --pl-space-2_5: 10px;
+  --pl-space-3: 12px;
+  --pl-space-4: 16px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --pl-color-bg: #ffffff;
+    --pl-color-fg: #111111;
+    --pl-color-accent: #6366f1;
+    --pl-color-border: rgba(0, 0, 0, 0.10);
+  }
+}
+
+:root[data-theme="light"] {
+  --pl-color-bg: #ffffff;
+  --pl-color-fg: #111111;
+  --pl-color-accent: #6366f1;
+  --pl-color-border: rgba(0, 0, 0, 0.10);
+}
+
+:root[data-theme="dark"] {
+  --pl-color-bg: #0a0a0c;
+  --pl-color-fg: #ededed;
+  --pl-color-accent: #9b87f2;
+  --pl-color-border: rgba(255, 255, 255, 0.08);
+}

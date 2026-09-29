@@ -19,7 +19,7 @@ _COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 _BLOCK_RE = re.compile(r"(?P<sel>[^{}]+)\{(?P<body>[^{}]*)\}", re.S)
 # A ``;`` OR end-of-block ends a declaration: a minifier drops the trailing ``;`` on the LAST
 # declaration in a block, so anchoring only on ``;`` would silently lose it.
-_DECL_RE = re.compile(r"(--[a-zA-Z0-9-]+)\s*:\s*([^;]+?)\s*(?:;|$)")
+_DECL_RE = re.compile(r"(--[a-zA-Z0-9_-]+)\s*:\s*([^;]+?)\s*(?:;|$)")   # `_` is legal in a custom-property name (e.g. --pl-space-0_5)
 # The opening of a light-preference wrapper, up to and including its ``{``. Its body is then
 # taken by BRACE DEPTH (see _extract_light_media) rather than by a trailing ``\n}`` — the old
 # anchor lost the light theme whenever tokens.css was minified (no newline before the close) or
