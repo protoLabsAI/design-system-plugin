@@ -23,7 +23,7 @@ is quietly reinventing something the system already ships, so **look before you 
 1. `ds_search "<keyword>"` — components, variants and tokens in one shot. Start here.
 2. `ds_story "<Component>"` for its variants plus a **live preview URL per variant** — link it,
    the user can click it.
-3. `ds_component "<Component>"` for the story source when you need real props and usage.
+3. `ds_component "<Component>"` for its real props and usage — any public export, read from the source module that ships it.
 4. `ds_rules` for judgment — when to use what, and what this system deliberately doesn't do.
 5. `ds_tokens "<section>"` for values. Pass the section ("Color", "Space", "Typography", …);
    the full set is a few thousand characters and most questions touch one family.

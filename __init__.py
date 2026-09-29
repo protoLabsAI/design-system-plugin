@@ -10,7 +10,7 @@ vocabulary — never a stale copy frozen into its knowledge base (the anti-drift
 Tools:
   ds_tokens      — the live token vocabulary (colors, spacing, radius, type, …)
   ds_components  — the component inventory (packages/ui)
-  ds_component   — one component's Storybook story SOURCE (the API / usage / props)
+  ds_component   — one public export's API by name (props from source + a story usage excerpt)
   ds_stories     — the published Storybook inventory: every component and every variant
   ds_story       — one component's variants + a LIVE render URL per variant
   ds_rules       — the visual-identity rules (when to use what, what we don't do)
@@ -202,40 +202,186 @@ def ds_tokens(section: str = "") -> str:
 
 @tool
 def ds_components() -> str:
-    """List the design-system COMPONENT inventory (packages/ui) — the components the agent owns
-    and should reuse/extend rather than reinvent. Live from the repo."""
+    """List the design-system COMPONENT inventory (packages/ui) — every public export by the
+    module you import it from, plus the Storybook story files. These are the components the
+    agent owns and should reuse/extend rather than reinvent. Live from the repo."""
     try:
-        names = _component_names(_gh_list(_cfg("components_path")))
+        entries = _gh_list(_cfg("components_path"))
     except RuntimeError as e:
         return f"ds_components error: {e}"
-    if not names:
+    names = _component_names(entries)
+    lines: list[str] = []
+    try:
+        index = _export_index()
+    except RuntimeError:
+        index = []
+    comps = [e for e in index if e["kind"] in ("component", "hook")]
+    if comps:
+        by_mod: dict[str, list[str]] = {}
+        for e in comps:
+            by_mod.setdefault(e["import"] or e["file"], []).append(e["name"])
+        lines.append(f"Public components & hooks ({len(comps)}) — read one with ds_component(name):")
+        lines += [f"- {mod}: {', '.join(sorted(ns))}" for mod, ns in sorted(by_mod.items())]
+    if names:
+        lines.append(f"Story files ({_cfg('components_path')}, {len(names)}):")
+        lines += [f"- {n}" for n in names]
+    if not lines:
         return f"No components found under {_cfg('components_path')}."
-    return f"Components ({_cfg('components_path')}, {len(names)}):\n" + "\n".join(f"- {n}" for n in names)
+    return "\n".join(lines)
 
 
 @tool
 def ds_component(name: str) -> str:
-    """Fetch a component's Storybook story — its variants, API, and usage — by name (e.g.
-    'Button', 'CommandPalette'). Read the real component before building on or changing it."""
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "", name or "").split(".", 1)[0]
+    """Read a design-system component's API — its props / signature (from the SOURCE module it
+    is exported from, with its JSDoc and props type), the import line, and how the stories use
+    it — by name, e.g. 'Button', 'Dialog', 'MobileNav', 'CommandPalette'. Works for every public
+    export, including ones that live in a module with a different name (MobileNav in
+    app-shell) and ones with no story file of their own. A partial name lists the close
+    exports ('Toast' → ToastProvider, useToast). Read the real component before building on or
+    changing it."""
+    safe = re.sub(r"[^A-Za-z0-9_$.-]", "", name or "").split(".", 1)[0]
     if not safe:
         return "ds_component: provide a component name (e.g. 'Button'). Use ds_components for the inventory."
     try:
+        index = _export_index()
+    except RuntimeError as e:
+        index, index_err = [], str(e)
+    else:
+        index_err = ""
+    cm = _components_mod()
+    hits = cm.lookup(index, safe)
+    if hits:
+        return _render_component(hits, safe)
+    # Not a public export by that name — the story file of that name is still worth reading
+    # (a Storybook GROUP such as "Overlays"), which is what this tool used to return.
+    try:
         return f"{safe}.stories.tsx:\n" + _gh_get_raw(f"{_cfg('components_path')}/{safe}.stories.tsx")
     except RuntimeError as e:
-        return f"ds_component error: {e}. Check the exact name with ds_components."
+        why = f" ({index_err})" if index_err else ""
+        return (f"ds_component: no public export or story named {safe!r}{why} — {e}. "
+                "Check the name with ds_search or ds_components.")
+
+
+def _render_component(hits: list[dict], query: str) -> str:
+    """One block per matched export: import line, API from source, a story usage excerpt."""
+    cm = _components_mod()
+    base = _cfg("components_path")
+    try:
+        story_files = [e["name"] for e in _gh_list(base) if re.search(r"\.stories\.(tsx|ts|jsx|js|mdx)$", str(e.get("name", "")))]
+    except RuntimeError:
+        story_files = []
+    exact = hits[0]["name"].lower() == query.lower()
+    out: list[str] = []
+    if not exact:
+        out.append(f"No export is named exactly {query!r}; closest public exports: " + ", ".join(h["name"] for h in hits) + ".")
+    sources: dict[str, str] = {}
+    for h in hits[:3]:
+        where = h["def_file"]
+        try:
+            src = sources.setdefault(where, _gh_get_raw(f"{base}/{where}"))
+        except RuntimeError as e:
+            out.append(f"## {h['name']}\n(source unavailable: {e})")
+            continue
+        kw = "import type" if h["kind"] == "type" else "import"
+        imp = f'{kw} {{ {h["name"]} }} from "{h["import"]}";' if h["import"] else f"(exported by {h['file']})"
+        block = [f"## {h['name']} ({h['kind']}) — {imp}", f"source: {base}/{where}"]
+        api = cm.extract_api(src, h.get("orig") or h["name"])
+        block.append("```tsx\n" + (api or f"// {h['name']} is re-exported here; its declaration isn't in {where}") + "\n```")
+        for sf in cm.story_candidates(h["name"], h["file"], story_files)[:2]:
+            try:
+                story = _gh_get_raw(f"{base}/{sf}")
+            except RuntimeError:
+                continue
+            ex = cm.usage_excerpt(story, h["name"])
+            if ex:
+                block.append(f"usage ({sf}):\n```tsx\n{ex}\n```")
+                break
+        out.append("\n".join(block))
+    return "\n\n".join(out)
+
+
+def _components_mod():
+    return _sibling("components.py")
+
+
+_EXP_CACHE: tuple[float, tuple, list[dict]] | None = None  # (fetched_at, key, index)
+_EXP_LOCK = threading.Lock()
+
+
+def _export_index(force: bool = False) -> list[dict]:
+    """Every PUBLIC export of the DS component package: ``[{name, kind, file, def_file,
+    import}]``. Public = the modules the package's ``package.json`` ``exports`` map names
+    (every source module when it has none); names = each module's ``export`` statements,
+    following same-directory re-exports. TTL-cached. Raises ``RuntimeError`` when the
+    component directory can't be listed."""
+    global _EXP_CACHE
+    import posixpath
+    import time
+
+    key = (_cfg("repo"), _cfg("ref"), _cfg("components_path"), id(_gh_list), id(_gh_get_raw))
+    if not force and _EXP_CACHE and _EXP_CACHE[1] == key and (time.time() - _EXP_CACHE[0]) < _FETCH_TTL:
+        return _EXP_CACHE[2]
+    with _EXP_LOCK:
+        if not force and _EXP_CACHE and _EXP_CACHE[1] == key and (time.time() - _EXP_CACHE[0]) < _FETCH_TTL:
+            return _EXP_CACHE[2]
+        cm = _components_mod()
+        base = _cfg("components_path").rstrip("/")
+        listing = [str(e.get("name", "")) for e in _gh_list(base) if e.get("type", "file") == "file"]
+        try:
+            pkg = _gh_get_raw(posixpath.join(posixpath.dirname(base), "package.json"))
+        except RuntimeError:
+            pkg = ""
+        sources: dict[str, str] = {}
+
+        def read(fn: str) -> str:
+            if fn not in sources:
+                try:
+                    sources[fn] = _gh_get_raw(f"{base}/{fn}")
+                except RuntimeError:
+                    sources[fn] = ""
+            return sources[fn]
+
+        index: dict[str, dict] = {}
+
+        def collect(module: str, fn: str, spec: str, depth: int = 0) -> None:
+            for e in cm.module_exports(read(fn)):
+                target = fn
+                if e["from"]:
+                    target = cm.resolve_relative(fn, e["from"], listing) or ""
+                    if e["name"] == "*":
+                        if target and depth < 2:
+                            collect(module, target, spec, depth + 1)
+                        continue
+                if e["name"] in index:
+                    continue
+                index[e["name"]] = {"name": e["name"], "kind": e["kind"], "file": module,
+                                    "def_file": target or fn, "import": spec, "orig": e.get("orig", "")}
+
+        for fn, spec in cm.public_modules(pkg, base, listing)[:60]:
+            collect(fn, fn, spec)
+        out = sorted(index.values(), key=lambda e: e["name"])
+        _EXP_CACHE = (time.time(), key, out)
+        return out
 
 
 @tool
 def ds_search(query: str) -> str:
-    """Search the design system by keyword — components, variants and tokens at once. The
-    fastest way to answer "do we have a…" before building anything: it matches component and
-    variant names AND token names/values, so "toast", "danger" or "spacing" all land. Use this
-    first; fall back to ds_stories / ds_tokens only when you need the full inventory."""
+    """Search the design system by keyword — public exports, Storybook components/variants, and
+    tokens at once. The fastest way to answer "do we have a…" before building anything: it
+    matches every exported component/hook name (MobileNav, CommandPalette, ToastProvider), the
+    Storybook component and variant names, AND token names/values, so "toast", "danger" or
+    "spacing" all land. Use this first; then ds_component(name) for the API."""
     q = (query or "").strip().lower()
     if not q:
         return "ds_search: give a keyword (e.g. 'toast', 'danger', 'spacing')."
     hits: list[str] = []
+    try:
+        for e in _components_mod().search(_export_index(), q, limit=15):
+            where = f'from "{e["import"]}"' if e["import"] else f"in {e['file']}"
+            kw = "import type" if e["kind"] == "type" else "import"
+            hits.append(f"- EXPORT {e['name']} ({e['kind']}) — {kw} {{ {e['name']} }} {where}")
+    except RuntimeError as e:
+        hits.append(f"- (component exports unavailable: {e})")
     try:
         for comp in _sb_components():
             variants = [st["name"] for st in comp["stories"] if q in st["name"].lower()]
@@ -251,12 +397,14 @@ def ds_search(query: str) -> str:
                     hits.append(f"- TOKEN var({t['var']}) = {t['value']}")
     except RuntimeError as e:
         hits.append(f"- (tokens unavailable: {e})")
-    if not hits:
+    if not any(h.startswith(("- EXPORT", "- COMPONENT", "- TOKEN")) for h in hits):
         return (
             f"No component, variant or token matches {query!r}. The system may genuinely not "
             "cover this — say so rather than inventing one, and propose an extension if it's warranted."
+            + ("\n" + "\n".join(hits) if hits else "")
         )
-    return f"{len(hits)} match(es) for {query!r}:\n" + "\n".join(hits[:40])
+    n = sum(1 for h in hits if h.startswith(("- EXPORT", "- COMPONENT", "- TOKEN")))
+    return f"{n} match(es) for {query!r}:\n" + "\n".join(hits[:40])
 
 
 @tool
@@ -496,9 +644,9 @@ def _vocab(force: bool = False):
 
 def _inventory(force: bool = False) -> list[str]:
     """The DS component names, for the control/shadow-component rules. Read from the
-    component SOURCE modules' exports (``export function Button``) — Storybook titles are
-    often groups ("Forms", "Overlays") and would miss Input/Textarea/Dialog entirely. Falls
-    back to story-file names, then to Storybook titles. Never raises: an empty inventory
+    package's PUBLIC exports (``_export_index``) — Storybook titles are often groups
+    ("Forms", "Overlays") and would miss Input/Textarea/Dialog entirely. Falls back to every
+    source module's exports plus story-file names, then to Storybook titles. Never raises: an empty inventory
     makes the engine use its default control map and skip shadow-component."""
     global _INV_CACHE
     import time
@@ -513,20 +661,27 @@ def _inventory(force: bool = False) -> list[str]:
         au = _audit_mod()
         names: set[str] = set()
         try:
-            entries = _gh_list(_cfg("components_path"))
-            names |= set(_component_names(entries))
-            sources = [
-                e["name"] for e in entries
-                if re.search(r"\.(tsx|jsx|ts|js)$", str(e.get("name", "")))
-                and not re.search(r"\.(stories|test|spec)\.", str(e.get("name", "")))
-            ][:40]
-            for fn in sources:
-                try:
-                    names |= set(au.exported_components(_gh_get_raw(f"{_cfg('components_path')}/{fn}")))
-                except RuntimeError:
-                    continue
+            # The package's PUBLIC exports first: story files are named for groups
+            # ("Overlays") and would read as components that don't exist.
+            names = {e["name"] for e in _export_index(force) if e["kind"] == "component"}
         except RuntimeError:
-            pass
+            names = set()
+        if not names:
+            try:
+                entries = _gh_list(_cfg("components_path"))
+                names |= set(_component_names(entries))
+                sources = [
+                    e["name"] for e in entries
+                    if re.search(r"\.(tsx|jsx|ts|js)$", str(e.get("name", "")))
+                    and not re.search(r"\.(stories|test|spec)\.", str(e.get("name", "")))
+                ][:40]
+                for fn in sources:
+                    try:
+                        names |= set(au.exported_components(_gh_get_raw(f"{_cfg('components_path')}/{fn}")))
+                    except RuntimeError:
+                        continue
+            except RuntimeError:
+                pass
         if not names:
             try:
                 names = {c["title"].split("/")[-1].replace(" ", "") for c in _sb_components()}
@@ -1816,12 +1971,13 @@ def _build_data_router():
         a stale class vocabulary with no way to refresh it, so a prototype could be written
         against classes the kit no longer ships.
         """
-        global _SB_CACHE, _KIT_CACHE, _VOCAB_CACHE, _INV_CACHE
+        global _SB_CACHE, _KIT_CACHE, _VOCAB_CACHE, _INV_CACHE, _EXP_CACHE
         _SB_CACHE = None
+        _EXP_CACHE = None
         _KIT_CACHE = None
         _VOCAB_CACHE = None
         _INV_CACHE = None
-        return {"ok": True, "cleared": ["storybook", "kit-classes", "vocabulary", "inventory"]}
+        return {"ok": True, "cleared": ["storybook", "kit-classes", "vocabulary", "inventory", "exports"]}
 
     return router
 

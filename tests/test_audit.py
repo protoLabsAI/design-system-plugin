@@ -327,7 +327,9 @@ export function Markdown() { return <DSMarkdown />; }
 function helper() {}"""
     f, _ = _run(code, "A.tsx", V, inventory=inv)
     got = {x["local"]: x["severity"] for x in f if x["rule"] == "shadow-component"}
-    assert got == {"StatusDot": "warn", "ModelChip": "info", "Markdown": "info"}  # DeleteDialog composes a DS dialog
+    # DeleteDialog composes a DS dialog; Markdown wraps the DS Markdown it imports; ModelChip is
+    # only NAMED like a Chip (no import, but no hand-written pl-chip either) — none is a fork.
+    assert got == {"StatusDot": "warn"}
 
 
 def test_shadow_component_needs_an_inventory(V):
@@ -681,10 +683,10 @@ def test_controls_are_checked_in_vue_svelte_and_html(V):
         assert [x["rule"] for x in f] == ["hand-rolled-control"], fn
 
 
-def test_lazy_wrapper_of_a_local_ds_wrapper_is_not_a_warn(V):
+def test_lazy_wrapper_of_a_local_ds_wrapper_is_not_flagged(V):
     code = 'const Impl = lazy(() => import("./Markdown"));\nexport function Markdown() { return <Impl/>; }'
     f, _ = _run(code, "LazyMarkdown.tsx", V, inventory=["Markdown"])
-    assert [(x["rule"], x["severity"]) for x in f] == [("shadow-component", "info")]
+    assert f == []
 
 
 def test_light_theme_shadows_are_known_too():
@@ -730,3 +732,77 @@ def test_reports_are_pruned_per_target(plugin, monkeypatch, tmp_path):
     assert sorted(p.name for p in d.iterdir()) == [
         "app-20260103-000000.json", "app-20260103-000000.md", "app-20260104-000000.json", "app-20260104-000000.md",
         "other-20260101-000000.md"]
+
+
+# ── shadow-component: composition is not a fork (#29) ────────────────────────
+
+_SHADOW_INV = ["Card", "Chip", "Grid", "Markdown", "Stat", "Surface"]
+
+
+def test_shadow_fixture_flags_the_real_shadow_and_none_of_the_composing_wrappers(V):
+    """ChatSurface/CodeSurface, OverviewCard/NodeRuntimeCard, CodeRefChip/ScheduledChip,
+    MetricGrid/KeyValueGrid and ChatMarkdown are app features built ON the DS; the local
+    `Card` that re-implements the DS Card without importing it is the one real shadow."""
+    res = audit.audit_tree(FIX / "shadows", V, inventory=_SHADOW_INV)
+    shadows = [f for f in res["findings"] if f["rule"] == "shadow-component"]
+    assert [(f["file"], f["local"], f["component"], f["severity"]) for f in shadows] == [
+        ("src/components/Card.tsx", "Card", "Card", "warn")]
+    assert res["summary"]["by_rule"]["shadow-component"] == len(shadows) == 1
+
+
+def test_a_family_named_component_that_hand_writes_the_ds_root_class_is_a_shadow(V):
+    code = """export function StatusSurface({ children }) {
+  return <section className="pl-surface pl-surface--raised">{children}</section>;
+}
+export function PanelSurface({ children }) {
+  return <section className="pl-surface__head">{children}</section>;
+}
+export function ToolbarSurface() { return <div className="toolbar" />; }"""
+    f, _ = _run(code, "A.tsx", V, inventory=_SHADOW_INV)
+    got = [(x["local"], x["severity"], x["evidence"]) for x in f if x["rule"] == "shadow-component"]
+    # A BEM part (pl-surface__head) alone isn't the root; ToolbarSurface is only NAMED like one.
+    assert got == [("StatusSurface", "warn", "root class pl-surface")]
+
+
+def test_root_class_evidence_is_scoped_to_the_component_that_writes_it(V):
+    code = """function RailSurface() { return <nav className="rail" />; }
+function Other() { return <div className="pl-surface" />; }"""
+    f, _ = _run(code, "A.tsx", V, inventory=_SHADOW_INV)
+    assert [x["local"] for x in f if x["rule"] == "shadow-component"] == []
+
+
+def test_a_wrapper_that_imports_or_renders_its_ds_namesake_is_never_flagged(V):
+    imports = 'import { Surface } from "@protolabsai/ui/layout";\nexport function ChatSurface() { return <div className="pl-surface" />; }'
+    renders = 'import * as UI from "../ds";\nexport function CodeSurface() { return <UI.Surface className="pl-surface" />; }'
+    affix = 'import { Card } from "@protolabsai/ui";\nexport function BaseCard() { return <Card />; }'
+    for code in (imports, renders, affix):
+        f, _ = _run(code, "A.tsx", V, inventory=_SHADOW_INV)
+        assert "shadow-component" not in _rules(f), code
+
+
+def test_affix_named_copy_without_the_ds_component_is_still_a_shadow(V):
+    f, _ = _run("export function CustomCard() { return <div />; }", "A.tsx", V, inventory=_SHADOW_INV)
+    assert [(x["local"], x["severity"]) for x in f if x["rule"] == "shadow-component"] == [("CustomCard", "warn")]
+
+
+def test_a_capped_report_says_how_many_it_shows_instead_of_a_second_count(V):
+    """The reply's count table is over every finding; its capped listing used to print a
+    different, smaller number for the same rule (44 in the table, 24 in the section)."""
+    code = "\n".join(f"function Custom{n}() {{ return null; }}" for n in ("Card", "Chip", "Grid", "Surface"))
+    ctx = audit.AuditContext(inventory=_SHADOW_INV)
+    fs = audit.audit_text(code, "A.tsx", V, ctx=ctx)
+    allf, summary = audit.finalize(fs, ctx, V)
+    assert summary["by_rule"]["shadow-component"] == 4
+    full = audit.render_markdown(allf, summary)
+    assert "Local components shadowing a DS component (4)" in full and "| `shadow-component` | consumer | 4 |" in full
+    capped = audit.render_markdown(allf[:2], summary)
+    assert "(2 of 4 shown — the report files hold all 4)" in capped
+
+
+def test_ds_audit_repo_counts_match_the_listed_findings(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_inventory", lambda force=False: list(_SHADOW_INV))
+    monkeypatch.setattr(plugin, "_AUDIT_ROOTS", [str(FIX)])
+    out = plugin.ds_audit_repo.func(path=str(FIX / "shadows"), rules="shadow-component")
+    assert "| `shadow-component` | consumer | 1 |" in out
+    assert "Local components shadowing a DS component (1)" in out
+    assert "src/components/Card.tsx" in out and "ChatSurface" not in out and "MetricGrid" not in out
