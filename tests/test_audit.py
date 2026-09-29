@@ -297,6 +297,26 @@ def test_hand_rolled_controls(V):
     assert "hand-rolled-control" not in _rules(f3)
 
 
+def test_composite_button_is_sanctioned_action_button_is_flagged(V):
+    # protoContent#551: a classed <button> wrapping >=2 element children (icon + label + meta,
+    # a whole-row trigger) is sanctioned; a raw action button is still a hand-rolled control.
+    code = """<button type="button" className="drawer-row" onClick={open}><Icon name="file" /><span className="drawer-row__label">{name}</span><span className="drawer-row__meta">{size}</span></button>
+<button onClick={save}>Save</button>"""
+    f, _ = _run(code, "A.tsx", V, inventory=["Button"])
+    hits = [x for x in f if x["rule"] == "hand-rolled-control"]
+    assert [(x["line"], x["component"]) for x in hits] == [(2, "Button")]  # composite row skipped; action button flagged
+
+
+def test_classed_action_buttons_and_unclassed_composite_still_flagged(V):
+    # A single icon, an icon + a text label, and a multi-element button WITHOUT a class are all
+    # action buttons — the class + >=2 element children exemption must not catch them.
+    code = """<button className="x"><Icon name="close" /></button>
+<button className="x"><Icon name="plus" /> Add</button>
+<button><Icon name="a" /><span>b</span></button>"""
+    f, _ = _run(code, "A.tsx", V, inventory=["Button"])
+    assert [x["line"] for x in f if x["rule"] == "hand-rolled-control"] == [1, 2, 3]
+
+
 def test_shadow_components(V):
     inv = ["StatusDot", "Chip", "Dialog", "Markdown"]
     code = """import { ConfirmDialog, Markdown as DSMarkdown } from "@protolabsai/ui/overlays";
