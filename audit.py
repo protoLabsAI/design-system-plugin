@@ -875,8 +875,8 @@ class _FileScan:
                 if kind == "radius":
                     if tok.endswith("%"):
                         continue  # circle
-                    if abs(px) >= 999 and not self.vocab.has_scale("radius"):
-                        continue  # a lone radius token has no pill step to snap 999px onto — leave it
+                    if abs(px) >= 999 and not any(p >= 999 for _n, p in self.vocab.scale("radius")):
+                        continue  # ≥999px with no pill step to snap onto — a bare pill/circle, leave it (as before)
                 off = vs + toff
                 self._judge_length(kind, prop, tok, px, off)
 
@@ -895,7 +895,11 @@ class _FileScan:
             self.ctx.missing.setdefault(kind, []).append({"file": self.filename, "line": self.lines.pos(off)[0], "value": tok, "prop": prop, "px": px})
             return
         entries = sorted({(p, n) for n, p in v.scale(kind)})
-        gaps = [b[0] - a[0] for a, b in zip(entries, entries[1:])]
+        # Gaps are measured between DISTINCT step values, not (px, name) pairs: two tokens at the
+        # same px (e.g. an alias --pl-gap-sm → --pl-space-2) must not manufacture a 0-wide gap that
+        # would wrongly mark a coarse scale as "decided".
+        pxs = sorted({p for _n, p in v.scale(kind)})
+        gaps = [b - a for a, b in zip(pxs, pxs[1:])]
         # A DECIDED spacing scale ships a step finer than its base (a half-step). In it an on-token
         # literal is simply on-scale (nothing to fix) and an off-token value bracketed by two steps
         # ≤ 4px apart is a snap the DS ruled on (#547), not a scale question. A coarse scale whose

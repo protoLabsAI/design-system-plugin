@@ -354,6 +354,51 @@ def test_radius_with_a_scale_is_never_a_missing_scale(VS):
     assert "radius" not in ctx.missing
 
 
+# A radius scale whose every step is finite — no pill token (< 999px throughout).
+_RADIUS_NO_PILL_CSS = """:root {
+  --pl-radius: 4px;
+  --pl-radius-md: 6px;
+  --pl-radius-lg: 8px;
+  --pl-radius-xl: 12px;
+}"""
+
+
+def test_radius_scale_without_a_pill_step_leaves_huge_radii_alone():
+    # #525 regression: a pill literal (≥999px) has no pill step to snap onto here, so it must be left
+    # alone — never warned down to the largest finite step (that turns a pill into a small corner).
+    v = vocab.build_vocab(_RADIUS_NO_PILL_CSS)
+    assert v.has_scale("radius") and not any(px >= 999 for _, px in v.scale("radius"))
+    f, ctx = _run(".a { border-radius: 9999px; } .b { border-radius: 999px; }", "a.css", v)
+    assert [x for x in f if x["rule"] == "off-scale-length"] == []   # no pill step → not snapped
+    assert ctx.off_scale == {}
+    # an ordinary off-token radius still snaps to the nearest finite step (the scale is decided).
+    g, _ = _run(".c { border-radius: 5px; }", "a.css", v)
+    off = [x for x in g if x["rule"] == "off-scale-length"]
+    assert len(off) == 1 and off[0]["severity"] == "warn" and "var(--pl-radius)" in off[0]["suggestion"]
+
+
+# A COARSE spacing scale (4/8/12/16, min step 4px) carrying an alias that duplicates one step's px.
+_COARSE_ALIAS_CSS = """:root {
+  --pl-space-1: 4px;
+  --pl-space-2: 8px;
+  --pl-gap-sm: var(--pl-space-2);
+  --pl-space-3: 12px;
+  --pl-space-4: 16px;
+}"""
+
+
+def test_duplicate_step_px_does_not_mark_a_coarse_scale_decided():
+    # #547 regression: gaps are measured between DISTINCT step values. Two tokens at the same px
+    # (--pl-gap-sm → --pl-space-2) must not manufacture a 0-wide gap that marks this coarse scale as
+    # "decided". 7px stays an undecided off-scale info + scale-gap candidate, not a ruled-out warn.
+    v = vocab.build_vocab(_COARSE_ALIAS_CSS)
+    assert sorted({px for _, px in v.scale("space")}) == [4, 8, 12, 16]     # distinct steps, 4px apart
+    f, ctx = _run(".a { gap: 7px; }", "a.css", v)
+    off = [x for x in f if x["rule"] == "off-scale-length"]
+    assert len(off) == 1 and off[0]["severity"] == "info"                   # coarse → not decided
+    assert ctx.off_scale.get("space")                                       # feeds scale-gap
+
+
 def test_box_shadow_owns_its_colors(V):
     f, _ = _run(".a { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35); } .b { box-shadow: 0 2px 4px rgba(0,0,0,.2); }", "a.css", V)
     assert _rules(f) == ["off-scale-length", "off-scale-length"]
