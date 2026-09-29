@@ -656,34 +656,61 @@ def audit_probe(probe: dict, vocab, rules=None) -> tuple[list[dict], dict]:
     for r in styles.get("spacing") or []:
         props = r.get("props") or {}
         length_rows.append(("space", "/".join(sorted(props, key=lambda p: -props[p])) or "spacing", r))
+    radius_has_pill = any(p >= 999 for _n, p in vocab.scale("radius"))
     for kind, prop, row in length_rows:
         vals = {v for v, _ in audit._split_top(str(row.get("v", "")))}
         pxs = [vocab_mod.parse_length(v) for v in vals]
-        pxs = [p for p in pxs if p is not None and p != 0]
+        pxs = [p for p in pxs if p is not None and p != 0]   # `%`/`em`/… parse to None and are skipped
         if not pxs:
             continue
-        if kind == "radius" and all(p >= 100 for p in pxs):
-            continue  # pills / circles
         for px in sorted(set(pxs)):
             if kind == "space" and abs(px) <= 1:
                 continue
+            if kind == "radius" and abs(px) >= audit._PILL_RADIUS_PX and not radius_has_pill:
+                continue  # ≥100px with no pill step to snap onto — a bare pill/circle, leave it (as before)
             stats["lengths_checked"] += 1
             near = vocab.nearest_length(kind, px)
             if near and near[2] < 0.5:
                 stats["good_lengths"] += 1
-                continue
+                continue  # on a token (a real step, or the pill for 999px)
             if not vocab.has_scale(kind):
                 _add_missing(stats, kind, f"{px:g}px", row, prop)
                 continue
-            if "off-scale-length" in want:
-                entries = sorted({(p, n) for n, p in vocab.scale(kind)})
-                below = [e for e in entries if e[0] <= abs(px)]
-                above = [e for e in entries if e[0] >= abs(px)]
-                around = " / ".join(f"{n}={p:g}px" for p, n in ([below[-1]] if below else []) + ([above[0]] if above else []))
-                findings.append(_f("off-scale-length", "warn" if row.get("n", 0) >= 10 else "info", where, _ex(row, f"{prop}: {px:g}px"),
-                                   f"{prop}: {px:g}px (×{row.get('n', 0)}) is off the {vocab_mod.SCALE_LABEL[kind]} scale (between {around})",
-                                   f"snap to {vocab.ref(near[0])}" if near else "use a scale token", group=f"{kind}: {px:g}px",
-                                   value_px=px, scale=kind, count=row.get("n", 0)))
+            if "off-scale-length" not in want:
+                continue
+            n = row.get("n", 0)
+            snippet = _ex(row, f"{prop}: {px:g}px")
+            # The radius scale (#525) is DECIDED, pill and all: every off-token radius is a consumer
+            # snap-to-nearest warn, never a DS scale-gap. ≥100px with a pill step snaps to the pill.
+            if kind == "radius":
+                how, names = audit.snap_radius(vocab, abs(px))
+                if how == "pill":
+                    msg = f"{prop}: {px:g}px (×{n}) is a pill radius — snap to {vocab.ref(names[0])}"
+                    group = f"radius: {px:g}px → {names[0]}"
+                else:
+                    msg = (f"{prop}: {px:g}px (×{n}) is off the border-radius scale — snap to the nearest step "
+                           + " or ".join(vocab.ref(nm) for nm in names))
+                    group = f"radius: {px:g}px"
+                findings.append(_f("off-scale-length", "warn", where, snippet, msg,
+                                   f"use {vocab.ref(names[0])}", group=group, value_px=px, scale=kind, count=n))
+                continue
+            # A spacing value the DECIDED scale ruled out (#547): its bracketing steps are ≤4px apart,
+            # so it's a snap the DS already settled — a warn naming both neighbours, never a scale-gap.
+            ruled = audit.spacing_ruled_out(vocab, abs(px)) if kind == "space" else None
+            if ruled:
+                lo_n, hi_n, target = ruled
+                findings.append(_f("off-scale-length", "warn", where, snippet,
+                                   f"{prop}: {px:g}px (×{n}) is ruled out by the spacing scale; snap to {vocab.ref(lo_n)} or {vocab.ref(hi_n)} (nearest {vocab.ref(target)})",
+                                   f"use {vocab.ref(target)}", group=f"{kind}: {px:g}px", value_px=px, scale=kind, count=n))
+                continue
+            entries = sorted({(p, nm) for nm, p in vocab.scale(kind)})
+            below = [e for e in entries if e[0] <= abs(px)]
+            above = [e for e in entries if e[0] >= abs(px)]
+            around = " / ".join(f"{nm}={p:g}px" for p, nm in ([below[-1]] if below else []) + ([above[0]] if above else []))
+            findings.append(_f("off-scale-length", "warn" if n >= 10 else "info", where, snippet,
+                               f"{prop}: {px:g}px (×{n}) is off the {vocab_mod.SCALE_LABEL[kind]} scale (between {around})",
+                               f"snap to {vocab.ref(near[0])}" if near else "use a scale token", group=f"{kind}: {px:g}px",
+                               value_px=px, scale=kind, count=n))
     for row in styles.get("shadows") or []:
         v = str(row.get("v", ""))
         stats["lengths_checked"] += 1

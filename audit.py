@@ -430,6 +430,46 @@ _RULED_OUT_GAP = 4.0
 # A literal border-radius at or above this is a pill: snap it to the pill token when the scale ships
 # one, rather than snapping it to the largest finite step (#525).
 _PILL_RADIUS_PX = 100.0
+
+
+def snap_radius(vocab, apx: float) -> tuple[str, list[str]]:
+    """How an off-token border-radius (absolute px, already known not to equal a token) snaps onto the
+    #525 radius scale. Returns ``("pill", [pill])`` when the scale ships a pill step (≥999px) and
+    ``apx`` is a pill (≥ ``_PILL_RADIUS_PX``); otherwise ``("nearest", names)`` — the nearest finite
+    step, ties listing both neighbours smaller-first. Shared by the repo auditor (``_judge_radius``)
+    and the rendered-site auditor (``siteprobe.audit_probe``) so the snap decision never drifts."""
+    scale = vocab.scale("radius")
+    pill = next((n for n, p in scale if p >= 999), None)
+    if pill and apx >= _PILL_RADIUS_PX:
+        return "pill", [pill]
+    steps = sorted({(p, n) for n, p in scale if p < 999})   # ascending px → the smaller step first
+    best = min(abs(apx - p) for p, _ in steps)
+    return "nearest", [n for p, n in steps if abs(abs(apx - p) - best) < 1e-6]
+
+
+def spacing_ruled_out(vocab, apx: float) -> tuple[str, str, str] | None:
+    """Whether an off-token spacing value (absolute px) is one the DECIDED scale (#547) already ruled
+    out — bracketed by two steps ≤ ``_RULED_OUT_GAP`` apart, in a scale whose finest step is finer than
+    that. Returns ``(lo_name, hi_name, target)`` — ``target`` the nearer step, ties → the smaller — or
+    ``None`` for an undecided off-scale value (a scale-gap candidate). Shared by ``_judge_length`` and
+    ``siteprobe.audit_probe`` so #547's ruled-out judgement lives in one place."""
+    entries = sorted({(p, n) for n, p in vocab.scale("space")})
+    # Gaps are measured between DISTINCT step values: an alias duplicating a step's px must not
+    # manufacture a 0-wide gap that wrongly marks a coarse scale as "decided".
+    pxs = sorted({p for _n, p in vocab.scale("space")})
+    gaps = [b - a for a, b in zip(pxs, pxs[1:])]
+    if not (bool(gaps) and min(gaps) < _RULED_OUT_GAP):
+        return None   # coarse scale — today's off-scale / scale-gap behaviour
+    below = [e for e in entries if e[0] <= apx]
+    above = [e for e in entries if e[0] >= apx]
+    if below and above and (above[0][0] - below[-1][0]) <= _RULED_OUT_GAP:
+        lo_p, lo_n = below[-1]
+        hi_p, hi_n = above[0]
+        target = lo_n if (apx - lo_p) <= (hi_p - apx) else hi_n   # ties → the smaller step
+        return lo_n, hi_n, target
+    return None
+
+
 _JS_STYLE_PROPS = re.compile(
     r"(?<![\w$.-])(fontSize|borderRadius|border(?:Top|Bottom)(?:Left|Right)Radius|gap|rowGap|columnGap|margin(?:Top|Right|Bottom|Left|Block|Inline)?|padding(?:Top|Right|Bottom|Left|Block|Inline)?|boxShadow|color|backgroundColor|background|borderColor|fill|stroke|outlineColor)\s*:\s*"
 )
@@ -914,10 +954,9 @@ class _FileScan:
             return
         below = [e for e in entries if e[0] <= abs(px)]
         above = [e for e in entries if e[0] >= abs(px)]
-        if decided and below and above and (above[0][0] - below[-1][0]) <= _RULED_OUT_GAP:
-            lo_p, lo_n = below[-1]
-            hi_p, hi_n = above[0]
-            target = lo_n if (abs(px) - lo_p) <= (hi_p - abs(px)) else hi_n   # ties → the smaller step
+        ruled = spacing_ruled_out(v, abs(px)) if kind == "space" else None
+        if ruled:
+            lo_n, hi_n, target = ruled
             self.add(_mk("off-scale-length", "warn", self.filename, self.lines, off,
                          f"{prop}: {tok} is ruled out by the spacing scale; snap to {v.ref(lo_n)} or {v.ref(hi_n)} (nearest {v.ref(target)})",
                          f"use {v.ref(target)}", group=f"{kind}: {tok}", value_px=px, scale=kind))
@@ -936,26 +975,22 @@ class _FileScan:
         step, breaking ties toward the smaller step (5px → --pl-radius, 7px names both md and lg)."""
         v = self.vocab
         apx = abs(px)
-        scale = v.scale("radius")
-        pill = next((n for n, p in scale if p >= 999), None)
-        exact = next((n for n, p in scale if p == apx), None)
+        exact = next((n for n, p in v.scale("radius") if p == apx), None)
         if exact is not None:
             self.add(_mk("off-scale-length", "warn", self.filename, self.lines, off,
                          f"hardcoded {prop}: {tok} is exactly {v.ref(exact)}",
                          f"use {v.ref(exact)}", group=f"radius: {tok} → {exact}", value_px=px, scale="radius"))
             return
-        if pill and apx >= _PILL_RADIUS_PX:
+        how, names = snap_radius(v, apx)
+        if how == "pill":
             self.add(_mk("off-scale-length", "warn", self.filename, self.lines, off,
-                         f"{prop}: {tok} is a pill radius — snap to {v.ref(pill)}",
-                         f"use {v.ref(pill)}", group=f"radius: {tok} → {pill}", value_px=px, scale="radius"))
+                         f"{prop}: {tok} is a pill radius — snap to {v.ref(names[0])}",
+                         f"use {v.ref(names[0])}", group=f"radius: {tok} → {names[0]}", value_px=px, scale="radius"))
             return
-        steps = sorted({(p, n) for n, p in scale if p < 999})   # ascending px → the smaller step first
-        best = min(abs(apx - p) for p, _ in steps)
-        near = [n for p, n in steps if abs(abs(apx - p) - best) < 1e-6]
-        named = " or ".join(v.ref(n) for n in near)
+        named = " or ".join(v.ref(n) for n in names)
         self.add(_mk("off-scale-length", "warn", self.filename, self.lines, off,
                      f"{prop}: {tok} is off the border-radius scale — snap to the nearest step {named}",
-                     f"use {v.ref(near[0])}", group=f"radius: {tok}", value_px=px, scale="radius"))
+                     f"use {v.ref(names[0])}", group=f"radius: {tok}", value_px=px, scale="radius"))
 
     def _judge_shadow(self, val: str, off: int) -> None:
         v = self.vocab
