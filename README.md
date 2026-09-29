@@ -100,7 +100,7 @@ fetched CSS and computed styles:
 | `off-scale-length` | consumer | hardcoded font-size / radius / gap-margin-padding / box-shadow where a token scale exists |
 | `ds-class-override` | consumer | app CSS whose selector **subject** is a DS class (`.x .pl-dialog__body {}`) — forking the component |
 | `legacy-alias` | consumer | app custom properties (`--brand-indigo: #6366f1`, or `var(--brand-indigo, #6366f1)`) duplicating a token's value |
-| `hand-rolled-control` | consumer | raw `<button>`/`<input>`/`<select>`/`<textarea>`/`<dialog>` in JSX when the DS ships the component |
+| `hand-rolled-control` | consumer | raw `<button>`/`<input>`/`<select>`/`<textarea>`/`<dialog>` in JSX when the DS ships the component (a composite `<button>` — a class **and** ≥2 element children, e.g. icon + label + meta — is exempt per protoContent#551) |
 | `shadow-component` | consumer | local components named like a DS component (`StatusDot`), or a `*Chip` family that doesn't use the DS one |
 | `foreign-ui-lib` | consumer | imports of MUI, Chakra, antd, shadcn `@/components/ui`, raw `@radix-ui/*`, Bootstrap, … |
 | `namespace-squat` | consumer | the app defines `--pl-*` names the DS doesn't ship (silences `unknown-token`, collides later) |

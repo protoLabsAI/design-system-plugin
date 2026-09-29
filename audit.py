@@ -30,6 +30,7 @@ consumer lane
   ds-class-override    app CSS restyling the DS's own .pl-* classes (forking the system)
   legacy-alias         app custom properties that re-declare a DS token's value (--brand-indigo)
   hand-rolled-control  raw <button>/<input>/<select>/<textarea>/<dialog> when the DS ships one
+                       (a composite <button>: class + >=2 element children is exempt — protoContent#551)
   shadow-component     a local component named like (or as a family of) a DS component
   foreign-ui-lib       imports of competing UI kits (MUI, Chakra, antd, shadcn, raw Radix, Bootstrap…)
 ds lane (aggregated across everything scanned)
@@ -966,6 +967,33 @@ class _FileScan:
                 return lower[cand.lower()]
         return None
 
+    def _composite_button(self, tag: str, tag_end: int) -> bool:
+        """A raw <button> is SANCTIONED (protoContent#551) when it carries a class/className AND
+        wraps a composite of >=2 top-level ELEMENT children — a whole-row drawer item (icon +
+        label + trailing meta), an agent-switcher trigger, a history-row toggle. ACTION buttons
+        (text-only, a lone icon, or an icon + a text label) stay flagged. Self-closing tags and
+        an unmatched </button> fail toward the finding (return False)."""
+        if tag_end < 0 or tag.rstrip().endswith("/"):
+            return False  # no closing '>' on the opening tag, or self-closing <button/>: no children
+        if not re.search(r"\bclass(Name)?\s*=", tag):
+            return False  # no class attribute → an action button, keep flagging
+        close = self.masked.find("</button", tag_end + 1)
+        if close < 0:
+            return False  # unmatched </button> → fail toward the finding
+        inner = mask_strings(self.masked[tag_end + 1: close])  # blank string bodies so a '>' in an attr can't mis-split a tag
+        depth = count = 0
+        for tm in re.finditer(r"<(/?)[A-Za-z][\w.\-]*[^>]*?(/?)>", inner):
+            if tm.group(1) == "/":
+                depth = max(0, depth - 1)
+                continue
+            if depth == 0:
+                count += 1
+                if count >= 2:
+                    return True
+            if tm.group(2) != "/":
+                depth += 1
+        return count >= 2
+
     def rule_controls(self) -> None:
         # In JS, a "<button>" inside a string literal is text, not markup: scan with string
         # contents blanked. Templates (HTML/Vue/Svelte) have no JS strings to worry about.
@@ -976,6 +1004,8 @@ class _FileScan:
             tag = self.masked[m.end(): tag_end if tag_end > 0 else m.end() + 200]
             if re.search(r"""\bclass(Name)?\s*=\s*[{'"`]*[^>]*?(?<![\w-])""" + re.escape(self.class_prefix[1:]), tag):
                 continue  # styled with the DS's own kit class — on-system (the no-build path)
+            if el == "button" and self._composite_button(tag, tag_end):
+                continue  # sanctioned composite row/trigger (class + >=2 element children) — protoContent#551
             if el == "input":
                 tm = re.search(r"""\btype\s*=\s*[{'"]*\s*['"]?([a-z]+)""", tag)
                 itype = tm.group(1) if tm else "text"
