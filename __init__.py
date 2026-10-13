@@ -1641,6 +1641,19 @@ def theme_palette(base_color: str, harmony: str = "complementary", mode: str = "
 
 
 @tool
+def theme_export(source_json: str, format: str = "dtcg") -> str:
+    """Export a theme_palette result, {mode, overrides}, or {dark, light} color maps.
+    Formats: dtcg (2025.10 sRGB color objects), css (custom properties), or
+    style-dictionary (legacy value/type). Preserves palette families and semantic
+    roles with mode metadata. Literal colors only; resolve references first.
+    Returns the serialized file content, without persisting or applying a theme."""
+    try:
+        return _sibling("themeexport.py").export_theme(source_json, format, _vocab_mod().parse_color)
+    except (ValueError, TypeError) as exc:
+        return f"theme_export error: {exc}"
+
+
+@tool
 def theme_apply(overrides_json: str, mode: str = "dark") -> str:
     """Apply a console theme: persist {mode, overrides} as this agent's theme (the exact
     blob the console's ThemePanel reads — takes effect on the next console load/agent
@@ -2008,7 +2021,7 @@ def register(registry) -> None:
     # DATA: gated /api/plugins/design-system — fetched with the handshake token.
     registry.register_router(_build_data_router(), prefix="/api/plugins/design-system")
     tools = [ds_tokens, ds_components, ds_component, ds_stories, ds_story, ds_search, ds_kit_classes, ds_rules, ds_check, ds_audit_repo,
-             ds_site_probe_script, ds_audit_url, ds_component_gaps, ds_drift, theme_scale, theme_contrast, theme_palette, theme_apply,
+             ds_site_probe_script, ds_audit_url, ds_component_gaps, ds_drift, theme_scale, theme_contrast, theme_palette, theme_export, theme_apply,
              theme_extract, theme_probe_script, theme_generate]
     registry.register_tools(tools)
 

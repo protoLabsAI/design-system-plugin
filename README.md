@@ -32,6 +32,7 @@ from the repo at call time** — the anti-drift principle, as tools.
 | `ds_audit_url <url_or_probe> [rules]` | audits a **live site** — from the probe (rendered truth: colors → nearest token by ΔE, type/radius/spacing/shadow vs the scales, `--pl-*` adoption + token drift, WCAG contrast, unnamed controls) or, as a **static** fallback, from a URL (HTML + stylesheets through the CSS rules) → the same score / lanes / report as `ds_audit_repo` |
 | `ds_component_gaps <probe>` | breaks a probed site into repeated patterns and classifies each **COVERED / VARIANT GAP / MISSING / UNCLASSIFIED** against the DS inventory — proposed name + props API, priority, and ready-to-file gap issues |
 | `ds_drift` | what changed since the last check (tokens + components); updates a snapshot |
+| `theme_export <source_json> [format]` | serialize palette results or color override maps to DTCG 2025.10, CSS, or legacy Style Dictionary; no theme mutation |
 | `theme_scale` / `theme_contrast` / `theme_palette` / `theme_apply` | the LCH theme-designer engine: an 11-step scale, a WCAG check, a harmony palette, and persisting `{mode, overrides}` as this console's theme |
 | `theme_extract <source>` | brand signals from a **URL** (static HTML + same-site/CDN stylesheets, no JS), raw **CSS**, a rendered **probe JSON**, or a **hex list** → ranked brand candidates with evidence, ground/text, fonts, radius, and suggested seeds with a confidence |
 | `theme_probe_script` | the in-page probe (`PROBE_JS`) — run it with `browser_eval` on a JS-rendered site and pass its JSON to `theme_extract` |
@@ -410,3 +411,24 @@ python -m server plugin install https://github.com/protoLabsAI/design-system-plu
 - Tailwind arbitrary lengths (`p-[13px]`, `text-[11px]`) in `off-scale-length`.
 - component-level a11y hints from the stories; a `doc-sync` companion that opens the docs PR the
   drift watch describes.
+
+
+### Export a color theme
+
+Pass the JSON returned by `theme_palette` to `theme_export`, or supply
+`{"mode":"dark","overrides":{"--pl-color-bg":"#101010"}}`.
+Both modes can be exported together as `{"dark":{...},"light":{...}}` maps.
+The result is file content suitable for saving with the host's file tools.
+
+- `format="dtcg"` uses [DTCG 2025.10 color objects](https://www.designtokens.org/tr/2025.10/color/)
+  under dark/light groups. Each token carries `$extensions.mode` and retains its
+  original CSS spelling in `$extensions["studio.protolabs"].css`.
+- `format="style-dictionary"` uses legacy `value` / `type` color leaves with CSS strings.
+- `format="css"` emits semantic `--pl-*` properties and palette families as
+  `--pl-palette-<family>-<stop>`. A single mode becomes `:root`; two modes use
+  dark at `:root` plus `[data-theme="light"]` overrides.
+
+This export supports literal colors only. References, dimensions, fonts and malformed
+input return an error; no entries are silently dropped. DTCG-aware importers must
+support the 2025.10 color value shape; this does not claim compatibility with older
+Tokens Studio draft importers. Export does not apply or persist a theme.
