@@ -25,7 +25,7 @@ def test_palette_round_trip_all_families_stops_and_roles():
             rgba = ds._vocab_mod().parse_color(color)
             assert leaf["$value"] == {"colorSpace": "srgb", "components": list(rgba[:3]), "alpha": rgba[3]}
             assert leaf["$type"] == "color"
-            assert leaf["$extensions"]["mode"] == "light"
+            assert leaf["$extensions"]["studio.protolabs"]["mode"] == "light"
             assert leaf["$extensions"]["studio.protolabs"]["css"] == color
     assert set(result["semantic"]) == set(source["overrides"])
 

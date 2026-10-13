@@ -421,8 +421,8 @@ Both modes can be exported together as `{"dark":{...},"light":{...}}` maps.
 The result is file content suitable for saving with the host's file tools.
 
 - `format="dtcg"` uses [DTCG 2025.10 color objects](https://www.designtokens.org/tr/2025.10/color/)
-  under dark/light groups. Each token carries `$extensions.mode` and retains its
-  original CSS spelling in `$extensions["studio.protolabs"].css`.
+  under dark/light groups. Each token carries mode and original CSS spelling in the vendor-namespaced
+  `$extensions["studio.protolabs"]` object, as required by the final format.
 - `format="style-dictionary"` uses legacy `value` / `type` color leaves with CSS strings.
 - `format="css"` emits semantic `--pl-*` properties and palette families as
   `--pl-palette-<family>-<stop>`. A single mode becomes `:root`; two modes use

@@ -92,7 +92,7 @@ def export_theme(source_json: str, format: str, parse_color) -> str:
         return {
             "$type": "color",
             "$value": {"colorSpace": "srgb", "components": list(rgba[:3]), "alpha": rgba[3]},
-            "$extensions": {"mode": mode, "studio.protolabs": {"css": literal}},
+            "$extensions": {"studio.protolabs": {"mode": mode, "css": literal}},
         }
 
     result = {}
