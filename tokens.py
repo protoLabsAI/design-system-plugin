@@ -180,6 +180,17 @@ def group_tokens(dark: dict[str, str], light: dict[str, str] | None = None) -> l
                 "themed": light.get(var, value) != value,
             }
         )
+    # Generated JS enumerates integer keys before fractional keys (0_5, 1_5,
+    # 2_5). Present the spacing ladder by its numeric step, independent of source
+    # order, while preserving order for other token families.
+    if "Space" in buckets:
+        def spacing_key(token):
+            suffix = token["var"].removeprefix("--pl-space-").replace("_", ".")
+            try:
+                return (0, float(suffix))
+            except ValueError:
+                return (1, suffix)
+        buckets["Space"].sort(key=spacing_key)
     return [
         {"section": s, "tokens": buckets[s]}
         for s in sorted(buckets, key=lambda s: (order.get(s, len(order)), s))
