@@ -59,7 +59,8 @@ def _literal_syntax(value: str) -> bool:
             return False
     hue = ("", "deg", "grad", "rad", "turn")
     if fn in ("hsl", "hsla"):
-        return component(parts[0], hue) and all(component(p, ("%",)) for p in parts[1:])
+        units = ("%",) if legacy else ("", "%")
+        return component(parts[0], hue) and all(component(p, units) for p in parts[1:])
     if fn in ("lch", "oklch"):
         return all(component(p) for p in parts[:2]) and component(parts[2], hue)
     return fn in ("rgb", "rgba", "lab", "oklab", "color") and all(component(p) for p in parts)

@@ -84,7 +84,7 @@ def test_css_collision_is_not_silently_overwritten():
 @pytest.mark.parametrize('format', ['dtcg', 'css', 'style-dictionary'])
 @pytest.mark.parametrize('color', [
     'rgb(255,,0,,0)', 'rgb(255 0 0 0.5)', 'rgb(255, 0, 0 / .5)',
-    'rgb(100%, 0, 0)', 'rgb(none, 0, 0)', 'hsl(0 100 50)',
+    'rgb(100%, 0, 0)', 'rgb(none, 0, 0)', 'hsl(0, 100, 50)',
     'hsl(20% 100% 50%)', 'oklch(50%, .1, 20)', 'color(srgb .1 .2 .3 .4)',
     'rgb(1e999 0 0)',
 ])
@@ -103,10 +103,18 @@ def test_linear_srgb_is_encoded_before_dtcg_labeling():
 
 @pytest.mark.parametrize('color', [
     'rgb(255, 0, 0)', 'rgba(100%, 0%, 0%, 50%)', 'rgb(100% 0 0 / .5)',
-    'hsl(120, 100%, 50%)', 'hsla(.5turn 100% 50% / 25%)',
+    'hsl(120, 100%, 50%)', 'hsl(0 100 50)', 'hsla(.5turn 100% 50% / 25%)',
     'oklch(50% .1 20deg / .5)', 'oklab(.5 .1 -.1)',
     'lab(50% 20 -20)', 'lch(50% 20 .5turn)', 'color(srgb .1 .2 .3 / .5)',
     'rgb(none 0 0 / none)', '#abc', 'rebeccapurple',
 ])
 def test_valid_color_syntax_preserves_css_literal(color):
     assert f'--pl-color-fg: {color};' in export({'overrides': {'--pl-color-fg': color}}, 'css')
+
+
+def test_semantic_values_keep_their_names_and_modern_hsl_units():
+    source = {'overrides': {'--pl-color-bg': 'hsl(0 100 50)', '--pl-color-fg': '#00f8'}}
+    semantics = json.loads(export(source))['dark']['semantic']
+    assert semantics['--pl-color-bg']['$value'] == {'colorSpace': 'srgb', 'components': [1, 0, 0], 'alpha': 1}
+    assert semantics['--pl-color-fg']['$value']['components'] == [0, 0, 1]
+    assert semantics['--pl-color-fg']['$value']['alpha'] == pytest.approx(8 / 15)
