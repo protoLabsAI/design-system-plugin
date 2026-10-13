@@ -79,3 +79,34 @@ def test_bad_json_and_format():
 def test_css_collision_is_not_silently_overwritten():
     source = {"overrides": {"--pl-palette-primary-50": "#000"}, "palette": {"scales": {"primary": {"50": "#fff"}}}}
     assert "collides" in export(source, "css")
+
+
+@pytest.mark.parametrize('format', ['dtcg', 'css', 'style-dictionary'])
+@pytest.mark.parametrize('color', [
+    'rgb(255,,0,,0)', 'rgb(255 0 0 0.5)', 'rgb(255, 0, 0 / .5)',
+    'rgb(100%, 0, 0)', 'rgb(none, 0, 0)', 'hsl(0 100 50)',
+    'hsl(20% 100% 50%)', 'oklch(50%, .1, 20)', 'color(srgb .1 .2 .3 .4)',
+    'rgb(1e999 0 0)',
+])
+def test_malformed_color_syntax_is_rejected_in_every_format(color, format):
+    assert export({'overrides': {'--pl-color-fg': color}}, format).startswith('theme_export error:')
+
+
+def test_linear_srgb_is_encoded_before_dtcg_labeling():
+    source = {'overrides': {'--pl-color-fg': 'color(srgb-linear 0.5 0.003 1 / 25%)'}}
+    value = json.loads(export(source))['dark']['semantic']['--pl-color-fg']['$value']
+    assert value['colorSpace'] == 'srgb'
+    assert value['components'] == pytest.approx([0.7353569830524495, 0.03876, 1])
+    assert value['alpha'] == .25
+    assert 'color(srgb-linear 0.5 0.003 1 / 25%)' in export(source, 'css')
+
+
+@pytest.mark.parametrize('color', [
+    'rgb(255, 0, 0)', 'rgba(100%, 0%, 0%, 50%)', 'rgb(100% 0 0 / .5)',
+    'hsl(120, 100%, 50%)', 'hsla(.5turn 100% 50% / 25%)',
+    'oklch(50% .1 20deg / .5)', 'oklab(.5 .1 -.1)',
+    'lab(50% 20 -20)', 'lch(50% 20 .5turn)', 'color(srgb .1 .2 .3 / .5)',
+    'rgb(none 0 0 / none)', '#abc', 'rebeccapurple',
+])
+def test_valid_color_syntax_preserves_css_literal(color):
+    assert f'--pl-color-fg: {color};' in export({'overrides': {'--pl-color-fg': color}}, 'css')

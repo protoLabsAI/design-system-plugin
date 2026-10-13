@@ -12,6 +12,57 @@ import re
 _NAME = re.compile(r"--pl-[A-Za-z0-9_-]+\Z")
 _FAMILY = re.compile(r"[A-Za-z][A-Za-z0-9_-]*\Z")
 _STOPS = {str(n) for n in (50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950)}
+_NUMBER = r"[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?"
+_COMPONENT = re.compile(rf"({_NUMBER})(%|deg|grad|rad|turn)?\Z", re.I)
+
+
+def _literal_syntax(value: str) -> bool:
+    """Validate the supported CSS grammar before the audit parser normalizes it.
+
+    The audit parser tolerates missing percentages and mixed separators. Export
+    preserves literals in CSS, so accepting those would emit invalid declarations.
+    This checks syntax only; color conversion stays in the shared vocabulary.
+    """
+    if re.fullmatch(r"#[0-9a-fA-F]{3,8}|[a-zA-Z]+", value):
+        return True  # The shared parser checks hex length and known names.
+    match = re.fullmatch(r"([a-z]+)\(([^()]*)\)", value, re.I)
+    if not match:
+        return False
+    fn, body = match[1].lower(), match[2]
+    legacy = "," in body
+
+    def component(text, units=("", "%")):
+        if text.lower() == "none":
+            return not legacy
+        number = _COMPONENT.fullmatch(text)
+        return bool(number and (number[2] or "").lower() in units and math.isfinite(float(number[1])))
+
+    if legacy:
+        if fn not in ("rgb", "rgba", "hsl", "hsla") or "/" in body:
+            return False
+        parts = [part.strip() for part in body.split(",")]
+        if len(parts) not in (3, 4):
+            return False
+        if len(parts) == 4 and not component(parts.pop()):
+            return False
+        if fn in ("rgb", "rgba") and len({part.endswith("%") for part in parts}) != 1:
+            return False
+    else:
+        sections = body.split("/")
+        if len(sections) > 2 or (len(sections) == 2 and not component(sections[1].strip())):
+            return False
+        parts = sections[0].split()
+        if fn == "color":
+            if not parts or parts.pop(0).lower() not in ("srgb", "srgb-linear"):
+                return False
+        if len(parts) != 3:
+            return False
+    hue = ("", "deg", "grad", "rad", "turn")
+    if fn in ("hsl", "hsla"):
+        return component(parts[0], hue) and all(component(p, ("%",)) for p in parts[1:])
+    if fn in ("lch", "oklch"):
+        return all(component(p) for p in parts[:2]) and component(parts[2], hue)
+    return fn in ("rgb", "rgba", "lab", "oklab", "color") and all(component(p) for p in parts)
 
 
 def export_theme(source_json: str, format: str, parse_color) -> str:
@@ -30,6 +81,8 @@ def export_theme(source_json: str, format: str, parse_color) -> str:
     def color(value):
         if not isinstance(value, str) or not value.strip() or re.search(r"[;{}<>\r\n]", value):
             raise ValueError("each value must be a literal CSS color")
+        if not _literal_syntax(value.strip()):
+            raise ValueError(f"unsupported or malformed color {value!r}")
         rgba = parse_color(value)
         if rgba is None or not all(math.isfinite(v) for v in rgba):
             raise ValueError(f"unsupported color {value!r}; resolve references before export")

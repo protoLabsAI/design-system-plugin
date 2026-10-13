@@ -431,4 +431,6 @@ The result is file content suitable for saving with the host's file tools.
 This export supports literal colors only. References, dimensions, fonts and malformed
 input return an error; no entries are silently dropped. DTCG-aware importers must
 support the 2025.10 color value shape; this does not claim compatibility with older
-Tokens Studio draft importers. Export does not apply or persist a theme.
+Tokens Studio draft importers. Functional colors are syntax-checked before export;
+linear-sRGB inputs are converted to encoded sRGB for DTCG while CSS retains the
+original literal. Export does not apply or persist a theme.
