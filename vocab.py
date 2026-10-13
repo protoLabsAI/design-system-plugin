@@ -516,7 +516,7 @@ def build_vocab(tokens_css: str = "", tokens_json: str | dict | None = None, ext
         else:
             # No bare :root (a `:host` / `.theme` / `html` token file): every declaration in
             # every block, one theme. Better than an empty vocabulary that flags every var.
-            flat = dict(re.findall(r"(--[a-zA-Z0-9-]+)\s*:\s*([^;{}]+);", re.sub(r"/\*.*?\*/", " ", tokens_css, flags=re.DOTALL)))
+            flat = dict(re.findall(r"(--[a-zA-Z0-9_-]+)\s*:\s*([^;{}]+);", re.sub(r"/\*.*?\*/", " ", tokens_css, flags=re.DOTALL)))
             if flat:
                 themes, source = {"default": {k: v.strip() for k, v in flat.items()}}, "css"
     if not themes and tokens_json:

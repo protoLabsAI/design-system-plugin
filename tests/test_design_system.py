@@ -1338,3 +1338,25 @@ def test_export_index_without_package_json_reads_every_source_module(ds_repo, mo
     assert "MobileNav" in idx and idx["MobileNav"]["import"] == ""
     assert "InternalThing" not in idx
     assert "(exported by app-shell.tsx)" in _call(ds.ds_component, name="MobileNav")
+
+
+# #35: exercise the public tool path with the published 81-token contract.
+def test_spacing_halfsteps_public_tools(monkeypatch):
+    css = (Path(__file__).parent / "fixtures/tokens-81.css").read_text()
+    monkeypatch.setattr(ds, "_gh_get_raw", lambda path: css if path == ds._cfg("tokens_css_path") else "")
+    monkeypatch.setattr(ds, "_export_index", lambda: [])
+    monkeypatch.setattr(ds, "_sb_components", lambda: [])
+    assert "81 tokens" in _call(ds.ds_tokens)
+    space = _call(ds.ds_tokens, section="Space")
+    assert "11 tokens" in space
+    names = re.findall(r"var\((--pl-space-[\w-]+)\)", space)
+    assert names == [f"--pl-space-{n}" for n in ("0_5", "1", "1_5", "2", "2_5", "3", "4", "5", "6", "8", "12")]
+    assert "TOKEN var(--pl-space-1_5) = 6px" in _call(ds.ds_search, query="space-1_5")
+    assert "unknown-token" in _call(ds.ds_check, code=".x { gap: var(--pl-space-1_6); }", filename="x.css")
+    assert "clean" in _call(ds.ds_check, code=".x { gap: var(--pl-space-1_5); }", filename="x.css")
+
+
+def test_scoped_vocabulary_preserves_halfstep_names():
+    v = ds._vocab_mod().build_vocab(":host { --pl-space-1_5: 6px; }")
+    assert v.is_known("--pl-space-1_5")
+    assert not v.is_known("--pl-space-1_6")
