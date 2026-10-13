@@ -137,10 +137,12 @@ def parse_color(text: str) -> RGBA | None:
     if not m:
         return None
     fn, body = m.group(1).lower(), m.group(2)
+    linear_srgb = False
     if fn == "color":
         parts = body.replace("/", " / ").split()
         if not parts or parts[0].lower() not in ("srgb", "srgb-linear"):
             return None
+        linear_srgb = parts[0].lower() == "srgb-linear"
         parts = parts[1:]
     else:
         parts = body.replace(",", " ").replace("/", " / ").split()
@@ -202,7 +204,7 @@ def parse_color(text: str) -> RGBA | None:
             ch = [_num(p) for p in parts]
             if None in ch:
                 return None
-            rgb = tuple(ch)
+            rgb = tuple(cc._linear_to_srgb(c) for c in ch) if linear_srgb else tuple(ch)
     except (ValueError, ZeroDivisionError, OverflowError):
         return None
     clamp = lambda c: max(0.0, min(1.0, float(c)))
