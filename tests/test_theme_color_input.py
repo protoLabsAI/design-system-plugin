@@ -96,6 +96,12 @@ def test_fully_transparent_foreground_is_invisible():
     assert th.contrast("transparent", "#ffffff")["ratio"] == 1.0
 
 
+def test_nearly_opaque_alpha_is_not_reported_as_1():
+    with pytest.raises(ValueError, match=r"alpha 0\.9999"):
+        th.contrast("#fff", "rgba(0, 0, 0, 0.9999)")
+    assert th.contrast("rgba(0, 0, 0, 0.9999)", "#fff")["foreground_alpha"] == 0.9999
+
+
 def test_opaque_result_shape_is_unchanged():
     assert set(th.contrast("#000", "#fff")) == {"ratio", "aa_normal", "aa_large", "aaa_normal"}
 
@@ -120,6 +126,12 @@ def test_translucent_background_is_refused_clearly(bg):
         "rgb(a, b, c)",
         "rgb(1px, 2, 3)",
         "rgb(1, 2, 3",
+        "rgb(0,0,0,)",
+        "rgb(,0,0,0)",
+        "rgb(10,20,,30)",
+        "rgb(0 0 0 0)",
+        "rgb(0 0)",
+        "rgba(0, 0, 0, 0.5, 1)",
         "rgb(inf, 0, 0)",
         "rgb(nan, 0, 0)",
         "var(--pl-color-fg)",
@@ -146,7 +158,7 @@ def test_scale_and_palette_take_the_same_forms():
 
 
 def test_validate_overrides_accepts_css_colors_and_survives_a_translucent_bg():
-    clean, warnings = th.validate_overrides({"--pl-color-fg": "rgb(229, 231, 235)", "--pl-color-bg": "oklch(0.2 0.02 260)"})
+    _, warnings = th.validate_overrides({"--pl-color-fg": "rgb(229, 231, 235)", "--pl-color-bg": "oklch(0.2 0.02 260)"})
     assert not any("not a parseable" in w for w in warnings)
     _, warnings = th.validate_overrides({"--pl-color-fg": "#fff", "--pl-color-bg": "rgba(0, 0, 0, 0.5)"})
     assert any("contrast not checked" in w for w in warnings)

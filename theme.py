@@ -16,6 +16,7 @@ desktop app can never grow a wheel, so a pip dependency was never viable here.
 from __future__ import annotations
 
 import importlib.util as _ilu
+import re
 from pathlib import Path as _Path
 
 _spec = _ilu.spec_from_file_location("design_system_colorcore", _Path(__file__).resolve().parent / "colorcore.py")
@@ -46,12 +47,29 @@ ACCEPTED_COLOR_FORMS = (
 )
 
 
+_FN_ARGS_RE = re.compile(r"^\s*[a-z-]+\((.*)\)\s*$", re.IGNORECASE | re.DOTALL)
+
+
+def _well_formed_args(color: str) -> bool:
+    """Reject argument lists a browser rejects but a lenient split would read: empty comma
+    slots (``rgb(0,0,0,)``, ``rgb(10,20,,30)``) and a 4th space-separated value without a
+    ``/`` (``rgb(0 0 0 0)``). Non-function input (hex, names) passes through untouched."""
+    m = _FN_ARGS_RE.match(color)
+    if not m:
+        return True
+    body = m.group(1)
+    if "," in body:
+        return all(part.strip() for part in body.split(","))
+    head = body.split("/", 1)[0].split()
+    return len(head) == 3 or (len(head) == 4 and head[0].lower() in ("srgb", "srgb-linear"))
+
+
 def parse_rgba(color: str) -> tuple[float, float, float, float]:
     """Any CSS color literal a browser computes → ``(r, g, b, a)`` floats 0..1.
     Raises ValueError naming the accepted forms on anything else."""
     if not isinstance(color, str) or not color.strip():
         raise ValueError(f"not a color: {color!r} — accepted: {ACCEPTED_COLOR_FORMS}")
-    rgba = _vocab_mod().parse_color(color)
+    rgba = _vocab_mod().parse_color(color) if _well_formed_args(color) else None
     if rgba is None:
         try:  # legacy: bare hex without the leading '#'
             rgba = (*cc.parse_hex(color), 1.0)
@@ -66,7 +84,7 @@ def parse_opaque(color: str, role: str = "color") -> tuple[float, float, float]:
     r, g, b, a = parse_rgba(color)
     if a < 1.0:
         raise ValueError(
-            f"{role} {color!r} is translucent (alpha {round(a, 3):g}) — pass the opaque color"
+            f"{role} {color!r} is translucent (alpha {a:.4g}) — pass the opaque color"
         )
     return (r, g, b)
 
@@ -117,7 +135,7 @@ def contrast(fg: str, bg: str) -> dict:
     br, bgc, bb, ba = parse_rgba(bg)
     if ba < 1.0:
         raise ValueError(
-            f"background {bg!r} is translucent (alpha {round(ba, 3):g}), so its contrast depends on "
+            f"background {bg!r} is translucent (alpha {ba:.4g}), so its contrast depends on "
             "what is painted behind it. Pass the opaque backdrop instead: for a transparent "
             "element, the nearest ancestor's computed background-color; for a tint, the tint "
             "composited onto that backdrop"
@@ -135,7 +153,7 @@ def contrast(fg: str, bg: str) -> dict:
         "aaa_normal": ratio >= 7.0,
     }
     if fa < 1.0:
-        out["foreground_alpha"] = round(fa, 3)
+        out["foreground_alpha"] = round(fa, 4)
         out["composited_foreground"] = cc.to_hex(fg_rgb)
     return out
 
