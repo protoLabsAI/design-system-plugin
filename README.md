@@ -293,6 +293,14 @@ allowlist rather than imported: plugins coordinate through the host, never by im
 other (ADR 0039). An unresolved name is skipped, so with the artifact plugin off the designer
 degrades to describing the prototype instead of failing.
 
+It also reads the component APIs it composes (`ds_components`/`ds_component`) and checks the
+color pairs it introduces (`theme_contrast`). Its other cross-plugin tools are read-only
+context, each skipped when its plugin is off: `get_artifact`/`list_artifacts` (an existing
+prototype), `github_get_issue`/`github_read_file` (the issue and the consuming code), and
+`browser_open`/`browser_snapshot`/`browser_screenshot` (the live page, or its own render). It
+has no write, comment or merge tools. `tests/test_subagent_allowlists.py` pins every
+subagent's allowlist exactly.
+
 `task("ds-designer", …)` in chat, then `task("design-critic", …)` to review it.
 
 ### `design-critic` subagent
@@ -302,7 +310,8 @@ accessibility reviewer. Hand it a UI prototype or component (JSX/TSX/HTML/CSS) +
 via `task("design-critic", …)`; it reviews against the **live** design system (grounded through
 the `ds_*` tools — tokens, rules, existing components) and WCAG a11y, and returns prioritized
 **BLOCKER / SHOULD-FIX / NIT** findings + a `ship-ready | revise | blocked` verdict. It reviews,
-it doesn't rewrite — the QA half of "prototype → critique → PR" (text, not pixels). Pairs with a
+it doesn't rewrite. Given an artifact id instead of source, it reads the prototype with
+`get_artifact` (its one cross-plugin tool, read-only). It is the QA half of "prototype → critique → PR" (text, not pixels). Pairs with a
 `component-author` delegate (a strong coding model on the gateway) that turns an approved prototype
 into a real `packages/ui` PR.
 

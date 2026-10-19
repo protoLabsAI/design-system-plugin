@@ -1418,6 +1418,8 @@ Ground every judgement in the LIVE system — don't review from memory:
 - `ds_check` — run the code through it to catch hardcoded colors a token already defines.
 - `ds_components` / `ds_component` — does a component for this already exist? Reinventing one that
   exists (Button, AppShell, Dialog, Field, …) instead of reusing it is a finding.
+- `get_artifact <id>` — when you're handed an artifact id instead of pasted source (e.g. a prototype
+  `ds-designer` rendered), read the artifact's source with it and review that. Don't ask for a paste.
 
 Review across four axes, in this priority order:
 1. **Design-system adherence** — hardcoded colors/spacing/radius/type that should be `--pl-*` tokens
@@ -1435,6 +1437,16 @@ Output format:
 Be specific and terse. No praise-padding. Hard stop at max_turns — return what you have."""
 
 
+# Read-only tools from OTHER plugins, named rather than imported (ADR 0039). Core binds a
+# subagent only the names in its allowlist that resolve, so each degrades to absent when its
+# plugin is off. READ tools only: a reviewer never writes.
+CRITIC_EXTERNAL_TOOLS = ("get_artifact",)
+
+
+def _critic_tools() -> list:
+    return [ds_rules, ds_tokens, ds_check, ds_components, ds_component]
+
+
 def _build_design_critic():
     from graph.subagents.config import SubagentConfig
 
@@ -1447,7 +1459,7 @@ def _build_design_critic():
             "verdict. It reviews — it doesn't rewrite. Use it before turning a prototype into a real PR."
         ),
         system_prompt=_CRITIC_PROMPT,
-        tools=["ds_rules", "ds_tokens", "ds_check", "ds_components", "ds_component"],
+        tools=[t.name for t in _critic_tools()] + list(CRITIC_EXTERNAL_TOOLS),
         max_turns=15,
     )
 
@@ -1513,11 +1525,22 @@ Ground everything in the live system before you write a line of markup:
 - `ds_tokens` — the `--pl-*` values. Never write a literal a token already defines.
 - `ds_stories` / `ds_story` — what the system already ships. If a component covers this,
   compose it rather than rebuilding it.
+- `ds_components` / `ds_component <name>` — a component's real props and usage. Read the API of
+  every component you compose; don't guess a prop.
+
+Read the context you were given, rather than working from a paraphrase:
+- `github_get_issue` — when you're designing for an issue, read it first.
+- `github_read_file` — the consuming repo's source, when the prototype must fit existing code.
+- `get_artifact` / `list_artifacts` — an existing prototype you're revising or building on.
+- `browser_open` + `browser_snapshot` / `browser_screenshot` — the live page you're designing
+  into, or a check of what you rendered.
+These come from other plugins; if one isn't available, say what you couldn't read and carry on.
 
 **Render it with `show_artifact`** — that is how a prototype reaches the operator. Pass
 `kind="html"` and a fragment structured with `.pl-*` classes, or `kind="react"` to compose the
 real `@pl/ui` components the artifact sandbox provides. Then call `check_artifact` and fix
-anything it reports before you hand back. Say what you built and why in a sentence; the
+anything it reports before you hand back. Check every fg/bg pair you introduce with
+`theme_contrast` (it takes hex, `rgb()` or `oklch()`). Say what you built and why in a sentence; the
 artifact panel carries the visual, so don't paste the markup into your reply as well.
 
 Writing the markup:
@@ -1536,12 +1559,29 @@ a named gap is a design-system finding, and worth more than a silent one-off."""
 
 
 def _designer_tools() -> list:
-    """This plugin's half of the designer's toolset. It also needs `show_artifact` /
-    `check_artifact` to render, which belong to the ARTIFACT plugin — named in the allowlist
-    below rather than imported, because plugins coordinate through the host, never by
-    importing each other (ADR 0039). An unresolved name is simply skipped, so the designer
-    degrades to describing the prototype when artifact is off instead of failing."""
-    return [ds_rules, ds_kit_classes, ds_tokens, ds_stories, ds_story, ds_check]
+    """This plugin's half of the designer's toolset. The rest (DESIGNER_EXTERNAL_TOOLS)
+    belongs to other plugins — named in the allowlist rather than imported, because plugins
+    coordinate through the host, never by importing each other (ADR 0039). An unresolved
+    name is simply skipped, so the designer degrades (e.g. to describing the prototype when
+    artifact is off) instead of failing."""
+    return [ds_rules, ds_kit_classes, ds_tokens, ds_stories, ds_story, ds_components, ds_component, ds_check, theme_contrast]
+
+
+# Other plugins' tools the designer may use. `show_artifact` / `check_artifact` render and
+# verify its OWN prototype; everything else is READ-only context — the issue it designs for,
+# the consuming repo's source, an existing artifact, a live page. No write, comment or merge
+# tools: the designer produces a prototype, never a change to someone else's state.
+DESIGNER_EXTERNAL_TOOLS = (
+    "show_artifact",
+    "check_artifact",
+    "get_artifact",
+    "list_artifacts",
+    "github_get_issue",
+    "github_read_file",
+    "browser_open",
+    "browser_snapshot",
+    "browser_screenshot",
+)
 
 
 def _build_designer():
@@ -1555,7 +1595,7 @@ def _build_designer():
             "before it becomes code. Returns a fragment, not a page."
         ),
         system_prompt=_DESIGNER_PROMPT,
-        tools=[t.name for t in _designer_tools()] + ["show_artifact", "check_artifact"],
+        tools=[t.name for t in _designer_tools()] + list(DESIGNER_EXTERNAL_TOOLS),
         max_turns=16,
     )
 
