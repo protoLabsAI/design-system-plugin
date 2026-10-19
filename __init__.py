@@ -1603,7 +1603,8 @@ def _theme_mod():
 def theme_scale(base_color: str, steps: int = 11) -> str:
     """A perceptually-uniform color scale from one base color — 11 Tailwind-style stops
     (50→950) interpolated through LCH lightness (95→15), so steps LOOK evenly spaced.
-    Use for building token families from a brand color. Returns JSON {stop: hex}."""
+    Use for building token families from a brand color. base_color: any opaque CSS color
+    (hex, rgb(), hsl(), oklch(), …). Returns JSON {stop: hex}."""
     _t = _theme_mod()
     try:
         return json.dumps(dict(zip(_t.SCALE_STOPS, _t.scale(base_color, steps))), indent=1)
@@ -1615,7 +1616,16 @@ def theme_scale(base_color: str, steps: int = 11) -> str:
 def theme_contrast(foreground: str, background: str) -> str:
     """WCAG 2.x contrast check for a color pair — ratio plus AA/AA-large/AAA verdicts.
     Check EVERY fg/bg pair you propose; never suggest a failing combination without
-    flagging it. Returns JSON."""
+    flagging it.
+
+    Accepts any CSS color a browser computes, so getComputedStyle output works as-is:
+    hex (#rgb, #rgba, #rrggbb, #rrggbbaa), rgb()/rgba() in comma or space syntax
+    (numbers or percentages, alpha as 0..1 or %), hsl()/hsla(), oklch(), oklab(),
+    lab(), lch(), color(srgb …) and common color names.
+    A translucent foreground is composited over the background (the result adds
+    foreground_alpha + composited_foreground). A translucent background is refused —
+    pass the opaque backdrop behind it (e.g. the nearest ancestor's background-color).
+    Returns JSON {ratio, aa_normal, aa_large, aaa_normal}."""
     _t = _theme_mod()
     try:
         return json.dumps(_t.contrast(foreground, background))
@@ -1628,7 +1638,8 @@ def theme_palette(base_color: str, harmony: str = "complementary", mode: str = "
     """Design a FULL console palette from one base color: harmony-derived primary/
     secondary/accent scales + fixed semantic hues (success/warning/error/neutral), mapped
     onto the console's --pl-* override keys for the given mode (dark|light), with a WCAG
-    contrast report for the key pairs. harmony: complementary|triadic|analogous. Review
+    contrast report for the key pairs. base_color: any opaque CSS color (hex, rgb(),
+    hsl(), oklch(), …). harmony: complementary|triadic|analogous. Review
     the contrast report, then persist with theme_apply. Returns JSON
     {palette, mode, overrides, contrast}."""
     _t = _theme_mod()

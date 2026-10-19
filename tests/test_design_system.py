@@ -221,7 +221,7 @@ def test_validate_overrides_gates_keys_and_warns_on_contrast():
     assert clean["--pl-color-fg"] == "#888888"
     assert any("FAILS WCAG AA" in w for w in warns)
     clean2, warns2 = th.validate_overrides({"--pl-radius": "12px"})
-    assert clean2["--pl-radius"] == "12px" and any("not a parseable hex color" in w for w in warns2)
+    assert clean2["--pl-radius"] == "12px" and any("not a parseable color" in w for w in warns2)
 
 
 def test_colorcore_roundtrip_and_luminance():

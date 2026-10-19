@@ -16,11 +16,77 @@ desktop app can never grow a wheel, so a pip dependency was never viable here.
 from __future__ import annotations
 
 import importlib.util as _ilu
+import re
 from pathlib import Path as _Path
 
 _spec = _ilu.spec_from_file_location("design_system_colorcore", _Path(__file__).resolve().parent / "colorcore.py")
 cc = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(cc)
+
+# The one strict CSS color parser in this plugin lives in vocab.py (hex 3/4/6/8, rgb[a],
+# hsl[a], oklch, oklab, lab, lch, color(srgb …), named colors). Loaded lazily by path:
+# vocab loads colorcore + tokens, never this module, so there is no cycle.
+_vocab = None
+
+
+def _vocab_mod():
+    global _vocab
+    if _vocab is None:
+        spec = _ilu.spec_from_file_location("design_system_vocab_theme", _Path(__file__).resolve().parent / "vocab.py")
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _vocab = mod
+    return _vocab
+
+
+ACCEPTED_COLOR_FORMS = (
+    "#rgb, #rgba, #rrggbb, #rrggbbaa (the # is optional for 3/6 digits), "
+    "rgb()/rgba() in comma or space syntax with numbers or percentages, "
+    "hsl()/hsla(), oklch(), oklab(), lab(), lch(), color(srgb …), "
+    "and common CSS color names"
+)
+
+
+_FN_ARGS_RE = re.compile(r"^\s*[a-z-]+\((.*)\)\s*$", re.IGNORECASE | re.DOTALL)
+
+
+def _well_formed_args(color: str) -> bool:
+    """Reject argument lists a browser rejects but a lenient split would read: empty comma
+    slots (``rgb(0,0,0,)``, ``rgb(10,20,,30)``) and a 4th space-separated value without a
+    ``/`` (``rgb(0 0 0 0)``). Non-function input (hex, names) passes through untouched."""
+    m = _FN_ARGS_RE.match(color)
+    if not m:
+        return True
+    body = m.group(1)
+    if "," in body:
+        return all(part.strip() for part in body.split(","))
+    head = body.split("/", 1)[0].split()
+    return len(head) == 3 or (len(head) == 4 and head[0].lower() in ("srgb", "srgb-linear"))
+
+
+def parse_rgba(color: str) -> tuple[float, float, float, float]:
+    """Any CSS color literal a browser computes → ``(r, g, b, a)`` floats 0..1.
+    Raises ValueError naming the accepted forms on anything else."""
+    if not isinstance(color, str) or not color.strip():
+        raise ValueError(f"not a color: {color!r} — accepted: {ACCEPTED_COLOR_FORMS}")
+    rgba = _vocab_mod().parse_color(color) if _well_formed_args(color) else None
+    if rgba is None:
+        try:  # legacy: bare hex without the leading '#'
+            rgba = (*cc.parse_hex(color), 1.0)
+        except ValueError:
+            raise ValueError(f"not a color: {color!r} — accepted: {ACCEPTED_COLOR_FORMS}") from None
+    return tuple(rgba)  # type: ignore[return-value]
+
+
+def parse_opaque(color: str, role: str = "color") -> tuple[float, float, float]:
+    """Like :func:`parse_rgba` but refuses a translucent color — for a base color an
+    alpha has no meaning, and dropping it silently would design from the wrong color."""
+    r, g, b, a = parse_rgba(color)
+    if a < 1.0:
+        raise ValueError(
+            f"{role} {color!r} is translucent (alpha {a:.4g}) — pass the opaque color"
+        )
+    return (r, g, b)
 
 # The scale positions proto2 used (Tailwind-style stops, 11 steps, 50→950).
 SCALE_STOPS = (50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950)
@@ -36,14 +102,14 @@ HARMONY_ROTATIONS = {
 
 
 def _norm_hex(color: str) -> str:
-    return cc.to_hex(cc.parse_hex(color))
+    return cc.to_hex(parse_opaque(color, "base color"))
 
 
 def scale(base: str, steps: int = 11) -> list[str]:
     """A perceptually-uniform lightness scale through ``base`` — proto2's recipe:
     interpolate base@L95 → base → base@L15 in LCH and sample ``steps`` colors.
     Light end first (step 50) → dark end last (step 950)."""
-    L, C, h = cc.hex_to_lch(base)
+    L, C, h = cc.rgb_to_lch(parse_opaque(base, "base color"))
     stops = [(95.0, C, h), (L, C, h), (15.0, C, h)]
     return [cc.lch_to_hex(cc.interp_lch(stops, i / (steps - 1))) for i in range(steps)]
 
@@ -53,21 +119,43 @@ def harmony(base: str, kind: str) -> list[str]:
     complementary | triadic | analogous."""
     if kind not in HARMONY_ROTATIONS:
         raise ValueError(f"unknown harmony {kind!r} — pick one of {sorted(HARMONY_ROTATIONS)}")
-    L, C, h = cc.hex_to_lch(base)
+    L, C, h = cc.rgb_to_lch(parse_opaque(base, "base color"))
     return [cc.lch_to_hex((L, C, (h + rot) % 360)) for rot in HARMONY_ROTATIONS[kind]]
 
 
 def contrast(fg: str, bg: str) -> dict:
-    """WCAG 2.x contrast ratio + level verdicts for a color pair."""
-    lf = cc.wcag_luminance(cc.parse_hex(fg))
-    lb = cc.wcag_luminance(cc.parse_hex(bg))
+    """WCAG 2.x contrast ratio + level verdicts for a color pair.
+
+    Both colors take any form :func:`parse_rgba` accepts (so ``getComputedStyle`` output
+    works as-is). A translucent FOREGROUND is composited over the background, as the
+    browser paints it, and the result carries the composited color. A translucent
+    BACKGROUND is refused: its contrast depends on whatever is behind it, which this
+    function cannot see."""
+    fr, fgc, fb, fa = parse_rgba(fg)
+    br, bgc, bb, ba = parse_rgba(bg)
+    if ba < 1.0:
+        raise ValueError(
+            f"background {bg!r} is translucent (alpha {ba:.4g}), so its contrast depends on "
+            "what is painted behind it. Pass the opaque backdrop instead: for a transparent "
+            "element, the nearest ancestor's computed background-color; for a tint, the tint "
+            "composited onto that backdrop"
+        )
+    fg_rgb = (fr, fgc, fb)
+    if fa < 1.0:  # source-over in sRGB, as browsers blend
+        fg_rgb = tuple(fa * f + (1.0 - fa) * b for f, b in zip(fg_rgb, (br, bgc, bb)))
+    lf = cc.wcag_luminance(fg_rgb)
+    lb = cc.wcag_luminance((br, bgc, bb))
     ratio = (max(lf, lb) + 0.05) / (min(lf, lb) + 0.05)
-    return {
+    out = {
         "ratio": round(ratio, 2),
         "aa_normal": ratio >= 4.5,
         "aa_large": ratio >= 3.0,
         "aaa_normal": ratio >= 7.0,
     }
+    if fa < 1.0:
+        out["foreground_alpha"] = round(fa, 4)
+        out["composited_foreground"] = cc.to_hex(fg_rgb)
+    return out
 
 
 def palette(base: str, kind: str = "complementary") -> dict:
@@ -141,13 +229,17 @@ def validate_overrides(overrides: dict) -> tuple[dict, list[str]]:
         if not isinstance(v, str) or not v.strip():
             raise ValueError(f"override {k} has a non-string/empty value")
         try:
-            cc.parse_hex(v)
-        except ValueError:  # non-hex tokens (radius, fonts, rgb()/oklch() strings) pass through
-            warnings.append(f"{k}: {v!r} is not a parseable hex color — passed through unvalidated")
+            parse_rgba(v)
+        except ValueError:  # non-color tokens (radius, fonts, var() refs) pass through
+            warnings.append(f"{k}: {v!r} is not a parseable color — passed through unvalidated")
         clean[k] = v.strip()
     fg, bg = clean.get("--pl-color-fg"), clean.get("--pl-color-bg")
     if fg and bg:
-        rep = contrast(fg, bg)
+        try:
+            rep = contrast(fg, bg)
+        except ValueError as exc:  # unparseable or translucent bg: can't judge, say so
+            warnings.append(f"fg/bg contrast not checked: {exc}")
+            rep = {"aa_normal": True}
         if not rep["aa_normal"]:
             warnings.append(f"fg/bg contrast {rep['ratio']}:1 FAILS WCAG AA (4.5:1) — theme applied anyway; consider fixing")
     return clean, warnings
