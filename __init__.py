@@ -1418,6 +1418,8 @@ Ground every judgement in the LIVE system — don't review from memory:
 - `ds_check` — run the code through it to catch hardcoded colors a token already defines.
 - `ds_components` / `ds_component` — does a component for this already exist? Reinventing one that
   exists (Button, AppShell, Dialog, Field, …) instead of reusing it is a finding.
+- `theme_contrast` — the ratio for any fg/bg pair you call out as a contrast finding. Measure it;
+  don't estimate.
 - `get_artifact <id>` — when you're handed an artifact id instead of pasted source (e.g. a prototype
   `ds-designer` rendered), read the artifact's source with it and review that. Don't ask for a paste.
 
@@ -1444,7 +1446,7 @@ CRITIC_EXTERNAL_TOOLS = ("get_artifact",)
 
 
 def _critic_tools() -> list:
-    return [ds_rules, ds_tokens, ds_check, ds_components, ds_component]
+    return [ds_rules, ds_tokens, ds_check, ds_components, ds_component, theme_contrast]
 
 
 def _build_design_critic():
@@ -1532,8 +1534,10 @@ Read the context you were given, rather than working from a paraphrase:
 - `github_get_issue` — when you're designing for an issue, read it first.
 - `github_read_file` — the consuming repo's source, when the prototype must fit existing code.
 - `get_artifact` / `list_artifacts` — an existing prototype you're revising or building on.
-- `browser_open` + `browser_snapshot` / `browser_screenshot` — the live page you're designing
-  into, or a check of what you rendered.
+- `browser_open` + `browser_snapshot` — read the LIVE page you're designing into (its structure
+  and real content). `browser_screenshot` saves a capture of that page and returns only its file
+  path. The browser session is shared with the lead agent, so don't navigate away from a page
+  it's working on. These tools are for existing pages, not your artifact.
 These come from other plugins; if one isn't available, say what you couldn't read and carry on.
 
 **Render it with `show_artifact`** — that is how a prototype reaches the operator. Pass

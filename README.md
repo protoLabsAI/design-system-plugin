@@ -297,8 +297,8 @@ It also reads the component APIs it composes (`ds_components`/`ds_component`) an
 color pairs it introduces (`theme_contrast`). Its other cross-plugin tools are read-only
 context, each skipped when its plugin is off: `get_artifact`/`list_artifacts` (an existing
 prototype), `github_get_issue`/`github_read_file` (the issue and the consuming code), and
-`browser_open`/`browser_snapshot`/`browser_screenshot` (the live page, or its own render). It
-has no write, comment or merge tools. `tests/test_subagent_allowlists.py` pins every
+`browser_open`/`browser_snapshot`/`browser_screenshot` (an existing live page; its own render is
+checked with `check_artifact`). It has no write, comment or merge tools. `tests/test_subagent_allowlists.py` pins every
 subagent's allowlist exactly.
 
 `task("ds-designer", …)` in chat, then `task("design-critic", …)` to review it.
@@ -311,7 +311,8 @@ via `task("design-critic", …)`; it reviews against the **live** design system 
 the `ds_*` tools — tokens, rules, existing components) and WCAG a11y, and returns prioritized
 **BLOCKER / SHOULD-FIX / NIT** findings + a `ship-ready | revise | blocked` verdict. It reviews,
 it doesn't rewrite. Given an artifact id instead of source, it reads the prototype with
-`get_artifact` (its one cross-plugin tool, read-only). It is the QA half of "prototype → critique → PR" (text, not pixels). Pairs with a
+`get_artifact` (its one cross-plugin tool, read-only), and measures contrast findings with
+`theme_contrast`. It is the QA half of "prototype → critique → PR" (text, not pixels). Pairs with a
 `component-author` delegate (a strong coding model on the gateway) that turns an approved prototype
 into a real `packages/ui` PR.
 

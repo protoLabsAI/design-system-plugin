@@ -42,7 +42,7 @@ DESIGNER = [
     "github_get_issue", "github_read_file",
     "browser_open", "browser_snapshot", "browser_screenshot",
 ]
-CRITIC = ["ds_rules", "ds_tokens", "ds_check", "ds_components", "ds_component", "get_artifact"]
+CRITIC = ["ds_rules", "ds_tokens", "ds_check", "ds_components", "ds_component", "theme_contrast", "get_artifact"]
 EXPLAINER = ["ds_rules", "ds_tokens", "ds_components", "ds_component", "ds_stories", "ds_story", "ds_check"]
 
 # Verbs that mark a tool as changing state somewhere. None may reach a subagent allowlist
@@ -97,4 +97,6 @@ def test_this_plugins_names_resolve_to_its_own_tools():
 def test_prompts_say_when_to_use_the_new_tools():
     for t in ("ds_component", "theme_contrast", "github_get_issue", "github_read_file", "get_artifact", "browser_screenshot"):
         assert t in ds._DESIGNER_PROMPT, t
-    assert "get_artifact" in ds._CRITIC_PROMPT
+    assert "get_artifact" in ds._CRITIC_PROMPT and "theme_contrast" in ds._CRITIC_PROMPT
+    # the browser tools read existing pages; the designer's own render is checked by check_artifact
+    assert "not your artifact" in ds._DESIGNER_PROMPT and "check_artifact" in ds._DESIGNER_PROMPT
