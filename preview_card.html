@@ -57,7 +57,9 @@
   summary { cursor: pointer; font-weight: 600; padding-block: 2px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); gap: var(--s3); margin-top: var(--s2); }
   .sw { display: flex; flex-direction: column; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
-  .chip { height: 40px; border-radius: calc(var(--radius) - 2px); border: 1px solid var(--border); position: relative; overflow: hidden;
+  .chip { height: 40px; border-radius: calc(var(--radius) - 2px); border: 1px solid var(--border); position: relative; overflow: hidden; }
+  /* The checkerboard only behind a TRANSLUCENT color, so it reads as transparency, not as a border. */
+  .chip.alpha {
     background-image: linear-gradient(45deg, #8888 25%, transparent 25%, transparent 75%, #8888 75%), linear-gradient(45deg, #8888 25%, transparent 25%, transparent 75%, #8888 75%);
     background-size: 10px 10px; background-position: 0 0, 5px 5px; }
   .chip > span { position: absolute; inset: 0; }
@@ -69,7 +71,7 @@
   .ratio { font-size: 20px; font-weight: 700; }
   ul.verdicts { list-style: none; padding: 0; margin: var(--s2) 0; display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); }
   .pass { color: var(--ok); } .fail { color: var(--bad); }
-  .sb { width: 100%; height: 320px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); display: block; }
+  .sb { width: 100%; height: 260px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); display: block; }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .err { color: var(--muted); }
 </style>
@@ -88,7 +90,7 @@
   // color to exactly this shape, so anything else here is corrupt data and drops only its own item.
   var COLOR_RE = /^#(?:[0-9a-f]{6}|[0-9a-f]{8})$/;
   var ID_RE = /^[a-f0-9]{32}$/;
-  var MAX_GROUPS = 16, MAX_SWATCHES = 512, MAX_STORIES = 100, FIRST_SWATCHES = 12;
+  var MAX_GROUPS = 16, MAX_SWATCHES = 512, MAX_STORIES = 100, FIRST_SWATCHES = 8;
   var RETRY_MAX = 5;
 
   var pair = (location.hash.match(/pair=([0-9a-f]+)/) || [])[1] || "";
@@ -407,7 +409,7 @@
     var code = el("code", { text: value });
     var acts = el("div", { cls: "acts" }, [copyButton(value, "Copy value", s.label + " " + value, code)]);
     if (s.copy) acts.appendChild(copyButton(s.copy, "Copy token", s.copy, null));
-    var kids = [el("div", { cls: "chip", "aria-hidden": "true" }, [fill]), el("span", { cls: "lbl", text: s.label }), code];
+    var kids = [el("div", { cls: value.length === 9 ? "chip alpha" : "chip", "aria-hidden": "true" }, [fill]), el("span", { cls: "lbl", text: s.label }), code];
     if (s.light) kids.push(el("span", { cls: "meta", text: "Dark " + s.value + " · Light " + s.light }));
     kids.push(acts);
     return el("div", { cls: "sw" }, kids);
