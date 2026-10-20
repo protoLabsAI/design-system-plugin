@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design preview</title>
+<!--
+  The `design-preview` FRAME component (ADR 0118 D5). The console mounts this page in a
+  sandbox="allow-scripts" iframe with NO same-origin: an opaque origin, no bearer, no storage.
+  Protocol (docs/reference/extensions.md in protoAgent):
+    ready {pair} -> init {props, theme, nonce} -> read {cid, path, nonce} -> readResult.
+  props are only {preview_id, title}; the snapshot is read from the GATED
+  /api/plugins/design-system/previews/<id> by the HOST on our behalf (reads=["previews/*"]).
+  Saved data is untrusted too: every item is re-validated here, and a bad item drops only itself.
+  Served with a CSP: this nonce'd script only, no fetch, nested frames only from the configured
+  Storybook origin.
+-->
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: var(--pl-color-bg, #0b0b0f);
+    --raised: var(--pl-color-bg-raised, #15151b);
+    --inset: var(--pl-color-bg-inset, #08080b);
+    --fg: var(--pl-color-fg, #ececf1);
+    --muted: var(--pl-color-fg-muted, #a0a0ab);
+    --border: var(--pl-color-border, #2a2a33);
+    --accent: var(--pl-color-accent, #8b7cf6);
+    --on-accent: var(--pl-color-fg-on-accent, #0b0b0f);
+    --focus: var(--pl-color-focus, #8b7cf6);
+    --ok: var(--pl-color-status-success, #3fb950);
+    --bad: var(--pl-color-status-error, #f85149);
+    --radius: var(--pl-radius, 8px);
+    --s1: var(--pl-space-1, 4px); --s2: var(--pl-space-2, 8px); --s3: var(--pl-space-3, 12px); --s4: var(--pl-space-4, 16px);
+    --mono: var(--pl-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    --xs: var(--pl-font-size-xs, 12px); --sm: var(--pl-font-size-sm, 13px);
+  }
+  html, body { margin: 0; background: transparent; }
+  body { font: var(--sm)/1.45 var(--pl-font-sans, system-ui, sans-serif); color: var(--fg); }
+  .card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--raised); padding: var(--s3); }
+  .head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--s2); margin-bottom: var(--s2); }
+  h2 { font-size: var(--sm); margin: 0; font-weight: 600; }
+  .meta, .note { color: var(--muted); font-size: var(--xs); }
+  .note { margin: var(--s2) 0 0; }
+  code { font-family: var(--mono); font-size: var(--xs); }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-block: var(--s2); }
+  button, select {
+    font: inherit; font-size: var(--xs); color: var(--fg); background: var(--inset);
+    border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); padding: 3px 8px; cursor: pointer;
+  }
+  button:hover, select:hover { border-color: var(--muted); }
+  button:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  /* Pressed toggles are visibly different, not only aria-pressed: accent fill + a check mark. */
+  button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
+  button[aria-pressed="true"]::before { content: "\2713\00a0"; }
+  button.done { border-color: var(--ok); }
+  details { margin-block: var(--s2); }
+  summary { cursor: pointer; font-weight: 600; padding-block: 2px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); gap: var(--s3); margin-top: var(--s2); }
+  .sw { display: flex; flex-direction: column; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+  .chip { height: 40px; border-radius: calc(var(--radius) - 2px); border: 1px solid var(--border); position: relative; overflow: hidden; }
+  /* The checkerboard only behind a TRANSLUCENT color, so it reads as transparency, not as a border. */
+  .chip.alpha {
+    background-image: linear-gradient(45deg, #8888 25%, transparent 25%, transparent 75%, #8888 75%), linear-gradient(45deg, #8888 25%, transparent 25%, transparent 75%, #8888 75%);
+    background-size: 10px 10px; background-position: 0 0, 5px 5px; }
+  .chip > span { position: absolute; inset: 0; }
+  .sw .lbl { font-family: var(--mono); font-size: var(--xs); }
+  .sw .acts { display: flex; flex-wrap: wrap; gap: var(--s1); }
+  .specimen { border-radius: var(--radius); padding: var(--s4); border: 1px solid var(--border); }
+  .specimen .big { font-size: 28px; font-weight: 700; line-height: 1.1; }
+  .specimen .large { font-size: 18px; font-weight: 600; }
+  .ratio { font-size: 20px; font-weight: 700; }
+  ul.verdicts { list-style: none; padding: 0; margin: var(--s2) 0; display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); }
+  .pass { color: var(--ok); } .fail { color: var(--bad); }
+  .sb { width: 100%; height: 260px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); display: block; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .err { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="card" id="card" aria-busy="true">
+  <div class="head"><h2 id="title">Design preview</h2><span class="meta" id="meta"></span></div>
+  <div id="body"><p class="meta" id="state">Loading preview…</p></div>
+</div>
+<!-- ONE polite live region for the whole card (copy feedback, load state). Not one per swatch. -->
+<div id="announce" class="sr" role="status" aria-live="polite"></div>
+<script nonce="__NONCE__">
+(function () {
+  "use strict";
+  // Keep identical to previews.COLOR_PATTERN (a test pins the two): the server canonicalises every
+  // color to exactly this shape, so anything else here is corrupt data and drops only its own item.
+  var COLOR_RE = /^#(?:[0-9a-f]{6}|[0-9a-f]{8})$/;
+  var ID_RE = /^[a-f0-9]{32}$/;
+  var MAX_GROUPS = 16, MAX_SWATCHES = 512, MAX_STORIES = 100, FIRST_SWATCHES = 8;
+  var RETRY_MAX = 5;
+
+  var pair = (location.hash.match(/pair=([0-9a-f]+)/) || [])[1] || "";
+  var nonce = null, cid = 0, pending = {}, ref = null, attempts = 0, retryTimer = null, loading = false, failed = false;
+  var $ = function (id) { return document.getElementById(id); };
+
+  function post(msg) { try { parent.postMessage(msg, "*"); } catch (e) { /* detached */ } }
+  function el(tag, attrs, kids) {
+    var n = document.createElement(tag);
+    for (var k in attrs || {}) {
+      if (k === "text") n.textContent = attrs[k];
+      else if (k === "cls") n.className = attrs[k];
+      else n.setAttribute(k, attrs[k]);
+    }
+    (kids || []).forEach(function (c) { if (c) n.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+    return n;
+  }
+  var announceTimer = null;
+  function announce(text) {
+    var a = $("announce");
+    a.textContent = "";
+    clearTimeout(announceTimer);
+    announceTimer = setTimeout(function () { a.textContent = text; }, 30);
+  }
+
+  // ── height: the host clamps it to [80, 1200] ─────────────────────────────────
+  var lastH = 0;
+  function reportHeight() {
+    var h = Math.ceil(document.documentElement.getBoundingClientRect().height) + 2;
+    if (h !== lastH) { lastH = h; post({ type: "protoComponent:height", height: h }); }
+  }
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(reportHeight).observe(document.body);
+  addEventListener("load", reportHeight);
+
+  // ── theme: a {name: value} record of --pl-* tokens from the host ────────────
+  function applyTheme(theme) {
+    if (!theme || typeof theme !== "object") return;
+    var root = document.documentElement.style;
+    Object.keys(theme).forEach(function (k) {
+      var v = theme[k];
+      if (typeof v !== "string" || /[<>{};]/.test(v)) return;
+      if (k === "color-scheme") root.setProperty("color-scheme", v);
+      else if (/^--pl-[a-z0-9-]+$/.test(k)) root.setProperty(k, v);
+    });
+  }
+
+  // ── host bridge ─────────────────────────────────────────────────────────────
+  function request(type, fields) {
+    return new Promise(function (resolve) {
+      var id = ++cid;
+      pending[id] = resolve;
+      var msg = { type: type, cid: id, nonce: nonce };
+      for (var k in fields) msg[k] = fields[k];
+      post(msg);
+    });
+  }
+  addEventListener("message", function (e) {
+    if (e.source !== parent || !e.data || typeof e.data !== "object") return;
+    var d = e.data;
+    if (d.type === "protoComponent:init") {
+      if (nonce !== null) return; // one init per mount
+      nonce = typeof d.nonce === "string" ? d.nonce : null;
+      applyTheme(d.theme);
+      start(d.props || {});
+    } else if (d.type === "protoComponent:theme") {
+      applyTheme(d.theme);
+    } else if ((d.type === "protoComponent:readResult" || d.type === "protoComponent:bridgeResult") && pending[d.cid]) {
+      var done = pending[d.cid];
+      delete pending[d.cid];
+      done(d);
+    }
+  });
+
+  // ── load + retry: a transient failure never sticks ───────────────────────────
+  function start(props) {
+    var id = props.preview_id, title = props.title;
+    if (typeof id !== "string" || !ID_RE.test(id) || typeof title !== "string" || !title || title.length > 200) {
+      return showError("This preview reference is invalid.", false);
+    }
+    ref = { id: id, title: title };
+    $("title").textContent = title;
+    load();
+  }
+  function load() {
+    if (!ref || loading) return;
+    loading = true;
+    clearTimeout(retryTimer);
+    $("card").setAttribute("aria-busy", "true");
+    request("protoComponent:read", { path: "previews/" + ref.id }).then(function (r) {
+      loading = false;
+      if (r.ok) {
+        failed = false;
+        var data = parsePreview(r.json);
+        if (!data) return showError("This saved preview couldn't be read.", false);
+        return render(data);
+      }
+      if (r.status === 404) return showError("This preview is no longer available. Saved previews are kept for a limited time.", true);
+      // Paused (scrolled away / hidden tab), a host refusal, a network or 5xx error: transient.
+      attempts += 1;
+      var reason = String(r.error || ("HTTP " + r.status)).slice(0, 160);
+      if (attempts <= RETRY_MAX) {
+        var wait = Math.min(30000, 1000 * Math.pow(2, attempts - 1));
+        retryTimer = setTimeout(load, wait);
+        showError("Couldn't load the preview (" + reason + "). Retrying…", true);
+      } else {
+        showError("Couldn't load the preview (" + reason + ").", true);
+      }
+    });
+  }
+  // Coming back to the tab retries a failed load straight away.
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible" && failed && !loading) { attempts = 0; load(); }
+  });
+  function showError(text, retryable) {
+    failed = retryable;
+    $("card").setAttribute("aria-busy", "false");
+    var body = $("body");
+    body.textContent = "";
+    var p = el("p", { cls: "err", text: text });
+    body.appendChild(p);
+    if (retryable) {
+      var b = el("button", { type: "button", text: "Retry" });
+      b.addEventListener("click", function () { attempts = 0; load(); });
+      body.appendChild(el("div", { cls: "row" }, [b]));
+    }
+    announce(text);
+    reportHeight();
+  }
+
+  // ── validation: per item; a bad item drops itself, never the card ────────────
+  function obj(v) { return v !== null && typeof v === "object" && !Array.isArray(v) ? v : null; }
+  function label(v, max) { return typeof v === "string" && v.length > 0 && v.length <= (max || 200); }
+  function httpUrl(v) {
+    if (!label(v, 4096)) return null;
+    try {
+      var u = new URL(v);
+      return (u.protocol === "https:" || u.protocol === "http:") && !u.username && !u.password ? u : null;
+    } catch (e) { return null; }
+  }
+  function storyOk(root, s) {
+    var path = root.pathname.replace(/\/$/, "");
+    var pv = httpUrl(s.preview), dc = httpUrl(s.docs);
+    return !!(pv && dc && pv.origin === root.origin && dc.origin === root.origin
+      && (pv.pathname === path + "/iframe" || pv.pathname === path + "/iframe.html")
+      && pv.searchParams.get("id") === s.id
+      && dc.pathname === path + "/" && dc.searchParams.get("path") === "/story/" + s.id);
+  }
+  function parsePreview(v) {
+    var p = obj(v);
+    if (!p || p.version !== 1 || !label(p.title)) return null;
+    var base = { title: p.title, created_at: label(p.created_at, 64) ? p.created_at : "", dropped: 0 };
+    if (p.kind === "palette") {
+      if (!Array.isArray(p.groups)) return null;
+      var groups = [], total = 0;
+      p.groups.slice(0, MAX_GROUPS).forEach(function (g) {
+        g = obj(g);
+        if (!g || !Array.isArray(g.swatches)) { base.dropped++; return; }
+        var sw = [];
+        g.swatches.forEach(function (s) {
+          s = obj(s);
+          if (!s || total >= MAX_SWATCHES || !label(s.label) || !COLOR_RE.test(s.value)) { base.dropped++; return; }
+          var out = { label: s.label, value: s.value };
+          if (typeof s.light === "string" && COLOR_RE.test(s.light)) out.light = s.light;
+          if (label(s.copy, 240)) out.copy = s.copy;
+          sw.push(out); total++;
+        });
+        if (sw.length) groups.push({ name: label(g.name) ? g.name : "Colors", swatches: sw });
+      });
+      if (!groups.length) return null;
+      base.dropped += typeof p.dropped === "number" ? p.dropped : 0;
+      base.kind = "palette"; base.mode = p.mode === "light" ? "light" : "dark"; base.groups = groups;
+      return base;
+    }
+    if (p.kind === "contrast") {
+      if (!COLOR_RE.test(p.foreground) || !COLOR_RE.test(p.background) || typeof p.ratio !== "number"
+        || !isFinite(p.ratio) || p.ratio < 1 || p.ratio > 21
+        || [p.aa_normal, p.aa_large, p.aaa_normal].some(function (b) { return typeof b !== "boolean"; })) return null;
+      base.kind = "contrast";
+      ["foreground", "background", "ratio", "aa_normal", "aa_large", "aaa_normal"].forEach(function (k) { base[k] = p[k]; });
+      base.foreground_input = label(p.foreground_input, 120) ? p.foreground_input : "";
+      base.background_input = label(p.background_input, 120) ? p.background_input : "";
+      base.foreground_alpha = typeof p.foreground_alpha === "number" ? p.foreground_alpha : null;
+      return base;
+    }
+    if (p.kind === "component") {
+      var root = httpUrl(p.storybook_url);
+      if (!root || root.search || root.hash || !Array.isArray(p.stories)) return null;
+      var stories = [];
+      p.stories.slice(0, MAX_STORIES).forEach(function (s) {
+        s = obj(s);
+        if (!s || !label(s.id) || !label(s.name) || !storyOk(root, s)) { base.dropped++; return; }
+        stories.push({ id: s.id, name: s.name, preview: s.preview, docs: s.docs });
+      });
+      if (!stories.length) return null;
+      base.kind = "component"; base.component_title = label(p.component_title) ? p.component_title : p.title; base.stories = stories;
+      return base;
+    }
+    return null;
+  }
+
+  // ── copy: the frame's clipboard is fenced, so degrade honestly ───────────────
+  // Spike (2026-10-19): in the console's sandbox="allow-scripts" frame, Chromium blocks
+  // navigator.clipboard (permissions policy: the host grants no clipboard-write) but honours
+  // execCommand("copy") on a click; WebKit honours both. If both fail, select the value so
+  // the user's own ⌘C / Ctrl+C copies it.
+  function copy(text, btn, selectEl) {
+    var ok = false;
+    var ta = el("textarea", { "aria-hidden": "true", readonly: "" });
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+    document.body.appendChild(ta);
+    ta.select();
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    btn.focus();
+    if (ok) return copied(btn, text);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { copied(btn, text); }, function () { selectFallback(btn, selectEl); });
+    } else selectFallback(btn, selectEl);
+  }
+  function copied(btn, text) {
+    var was = btn.getAttribute("data-label");
+    btn.textContent = "Copied";
+    btn.classList.add("done");
+    announce("Copied " + text);
+    setTimeout(function () { btn.textContent = was; btn.classList.remove("done"); }, 1500);
+  }
+  function selectFallback(btn, selectEl) {
+    if (selectEl) {
+      var r = document.createRange();
+      r.selectNodeContents(selectEl);
+      var sel = getSelection();
+      sel.removeAllRanges(); sel.addRange(r);
+    }
+    announce("Copy is blocked here. The value is selected: press Command-C or Control-C.");
+    btn.textContent = "Selected: press ⌘C";
+    setTimeout(function () { btn.textContent = btn.getAttribute("data-label"); }, 2500);
+  }
+  function copyButton(text, visible, describe, selectEl) {
+    var b = el("button", { type: "button", "data-label": visible, "aria-label": visible + ": " + describe, text: visible });
+    b.addEventListener("click", function () { copy(text, b, selectEl); });
+    return b;
+  }
+
+  // ── renderers ───────────────────────────────────────────────────────────────
+  function render(d) {
+    var body = $("body");
+    body.textContent = "";
+    $("card").setAttribute("aria-busy", "false");
+    $("meta").textContent = d.kind === "component" ? "Live from Storybook"
+      : "Saved" + (d.created_at ? " " + d.created_at.slice(0, 10) : "");
+    if (d.kind === "palette") renderPalette(d, body);
+    else if (d.kind === "contrast") renderContrast(d, body);
+    else renderComponent(d, body);
+    if (d.dropped) body.appendChild(el("p", { cls: "note", text: d.dropped + " item(s) couldn't be shown and were left out." }));
+    reportHeight();
+  }
+
+  function toggleGroup(labelText, options, current, onPick) {
+    var g = el("div", { cls: "row", role: "group", "aria-label": labelText });
+    var buttons = options.map(function (o) {
+      var b = el("button", { type: "button", "aria-pressed": String(o[0] === current), text: o[1] });
+      b.addEventListener("click", function () {
+        buttons.forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+        onPick(o[0]);
+      });
+      return b;
+    });
+    buttons.forEach(function (b) { g.appendChild(b); });
+    return g;
+  }
+
+  function renderPalette(d, body) {
+    var mode = d.mode;
+    var paired = d.groups.some(function (g) { return g.swatches.some(function (s) { return s.light; }); });
+    var holder = el("div");
+    function draw() {
+      holder.textContent = "";
+      d.groups.forEach(function (g, i) { holder.appendChild(groupView(g, i === 0, mode)); });
+      reportHeight();
+    }
+    if (paired) body.appendChild(toggleGroup("Palette appearance", [["dark", "Dark"], ["light", "Light"]], mode, function (m) { mode = m; draw(); }));
+    body.appendChild(holder);
+    draw();
+  }
+  function groupView(g, open, mode) {
+    var det = el("details");
+    if (open) det.open = true;
+    det.appendChild(el("summary", { text: g.name + " · " + g.swatches.length + (g.swatches.length === 1 ? " color" : " colors") }));
+    var grid = el("div", { cls: "grid" });
+    var showAll = g.swatches.length <= FIRST_SWATCHES;
+    function fill() {
+      grid.textContent = "";
+      (showAll ? g.swatches : g.swatches.slice(0, FIRST_SWATCHES)).forEach(function (s) { grid.appendChild(swatchView(s, mode)); });
+      reportHeight();
+    }
+    det.appendChild(grid);
+    if (!showAll) {
+      var more = el("button", { type: "button", "aria-expanded": "false", text: "Show all " + g.swatches.length });
+      more.addEventListener("click", function () {
+        showAll = !showAll;
+        more.setAttribute("aria-expanded", String(showAll));
+        more.textContent = showAll ? "Show fewer" : "Show all " + g.swatches.length;
+        fill();
+      });
+      det.appendChild(el("div", { cls: "row" }, [more]));
+    }
+    det.addEventListener("toggle", reportHeight);
+    fill();
+    return det;
+  }
+  function swatchView(s, mode) {
+    var value = mode === "light" && s.light ? s.light : s.value;
+    var fill = el("span");
+    fill.style.background = value; // validated #hex only
+    var code = el("code", { text: value });
+    var acts = el("div", { cls: "acts" }, [copyButton(value, "Copy value", s.label + " " + value, code)]);
+    if (s.copy) acts.appendChild(copyButton(s.copy, "Copy token", s.copy, null));
+    var kids = [el("div", { cls: value.length === 9 ? "chip alpha" : "chip", "aria-hidden": "true" }, [fill]), el("span", { cls: "lbl", text: s.label }), code];
+    if (s.light) kids.push(el("span", { cls: "meta", text: "Dark " + s.value + " · Light " + s.light }));
+    kids.push(acts);
+    return el("div", { cls: "sw" }, kids);
+  }
+
+  function renderContrast(d, body) {
+    var spec = el("div", { cls: "specimen" }, [
+      el("div", { cls: "big", text: "Aa" }),
+      el("div", { cls: "large", text: "Large text — 18px semibold" }),
+      el("div", { text: "Body text at the size most UI copy uses." }),
+    ]);
+    spec.style.color = d.foreground;
+    spec.style.background = d.background;
+    body.appendChild(spec);
+    var fgCode = el("code", { text: d.foreground }), bgCode = el("code", { text: d.background });
+    body.appendChild(el("p", {}, [fgCode, " on ", bgCode, " · ", el("span", { cls: "ratio", text: d.ratio + ":1" })]));
+    var ul = el("ul", { cls: "verdicts" });
+    [["AA body text", d.aa_normal, "4.5:1"], ["AA large text", d.aa_large, "3:1"], ["AAA body text", d.aaa_normal, "7:1"]].forEach(function (v) {
+      ul.appendChild(el("li", { cls: v[1] ? "pass" : "fail" }, [(v[1] ? "✓ Pass" : "✕ Fail") + " — " + v[0] + " (needs " + v[2] + ")"]));
+    });
+    body.appendChild(ul);
+    if (d.foreground_alpha !== null) {
+      body.appendChild(el("p", { cls: "note", text: "The foreground is translucent (alpha " + d.foreground_alpha + "); the sample shows it composited over the background, as measured." }));
+    }
+    if (d.foreground_input || d.background_input) {
+      body.appendChild(el("p", { cls: "note", text: "Checked: " + d.foreground_input + " on " + d.background_input }));
+    }
+    body.appendChild(el("div", { cls: "row" }, [
+      copyButton(d.foreground, "Copy foreground", d.foreground, fgCode),
+      copyButton(d.background, "Copy background", d.background, bgCode),
+    ]));
+  }
+
+  function renderComponent(d, body) {
+    var idx = 0, mode = "dark";
+    var sel = el("select", { "aria-label": "Variant" });
+    d.stories.forEach(function (s, i) { sel.appendChild(el("option", { value: String(i), text: s.name })); });
+    var frameBox = el("div");
+    var status = el("p", { cls: "note" });
+    var openBtn = el("button", { type: "button", text: "Open in Storybook ↗" });
+    var loadTimer = null;
+    function draw() {
+      var s = d.stories[idx];
+      var u = new URL(s.preview);
+      u.searchParams.set("globals", "theme:" + mode);
+      frameBox.textContent = "";
+      status.textContent = "Live render from the published Storybook: it shows the component as it is now, not as it was when this card was saved.";
+      var f = el("iframe", { cls: "sb", src: u.href, title: d.component_title + " — " + s.name, sandbox: "allow-scripts", referrerpolicy: "no-referrer", loading: "lazy" });
+      clearTimeout(loadTimer);
+      var loaded = false;
+      f.addEventListener("load", function () { loaded = true; });
+      loadTimer = setTimeout(function () {
+        if (!loaded) status.textContent = "The live render hasn't loaded. Open it in Storybook instead.";
+        reportHeight();
+      }, 15000);
+      frameBox.appendChild(f);
+      reportHeight();
+    }
+    sel.addEventListener("change", function () { idx = Number(sel.value) || 0; draw(); });
+    openBtn.addEventListener("click", function () {
+      // Popups are sandboxed off; the HOST opens links, after the operator confirms (ADR 0118 D4).
+      request("protoComponent:openLink", { url: d.stories[idx].docs }).then(function (r) {
+        if (!r.ok && r.error) announce("Couldn't open Storybook: " + r.error);
+      });
+    });
+    var label = el("label", { cls: "meta" }, ["Variant ", sel]);
+    body.appendChild(el("div", { cls: "row" }, [label, toggleGroup("Story appearance", [["dark", "Dark"], ["light", "Light"]], mode, function (m) { mode = m; draw(); })]));
+    body.appendChild(frameBox);
+    body.appendChild(status);
+    var idCode = el("code", { cls: "meta", text: d.stories[idx].id });
+    body.appendChild(el("div", { cls: "row" }, [openBtn, idCode]));
+    sel.addEventListener("change", function () { idCode.textContent = d.stories[idx].id; });
+    draw();
+  }
+
+  reportHeight();
+  post({ type: "protoComponent:ready", pair: pair });
+})();
+</script>
+</body>
+</html>

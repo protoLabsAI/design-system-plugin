@@ -2,11 +2,15 @@ id: design-system
 name: Design System
 version: 0.14.0
 
-# The newest host seam this plugin depends on: TYPED `emits:` contracts (#1636, core 0.99.0).
-# `registry.emit` itself landed in 0.31.0 and `views[].palette` in 0.71.0, so 0.99.0 is the
-# floor where everything here exists. Declared because both degrade SILENTLY on an older host
-# — no error, just a missing ⌘K entry and an untyped event contract.
-min_protoagent_version: "0.99.0"
+# The newest host seam this plugin depends on is the FRAME component (ADR 0118 D5:
+# register_component(frame=, reads=), the paired handshake and the host-mediated read channel,
+# #4143), first shipped in core 0.202.0; inline design previews render through it. Older seams
+# it also uses: typed `emits:` contracts (0.99.0), `views[].palette` (0.71.0), `registry.emit`
+# (0.31.0). Declared because each degrades SILENTLY on an older host.
+# Deliberately a hard floor, not a soft fallback: fleet policy (Josh, 2026-09-27) is that a
+# plugin raises its core floor freely and old-core agents upgrade. The runtime guard
+# (_register_preview_component) only keeps a mis-pinned host from crashing on load.
+min_protoagent_version: "0.202.0"
 description: >-
   The agent's live window into a design system, and a console surface for browsing one. Reads
   the configured repo's design tokens, component inventory and visual-identity rules STRAIGHT
@@ -77,6 +81,11 @@ capabilities:
 
 # Auth: the GitHub contents API is read with GITHUB_TOKEN / GH_TOKEN from the env (protoContent
 # is private). Same token the github plugin uses; no separate plugin secret.
+
+# The `design-preview` frame component page (ADR 0118 D5). An opaque-origin frame sends no
+# bearer, so the page is auth-exempt; it carries no data (the snapshot comes through the host's
+# read channel from the GATED /api/plugins/design-system/previews/<id>).
+public_paths: ["/plugins/design-system/preview-card"]
 
 # Console view (ADR 0038) — the design-system explorer. The plugin serves its own page;
 # the console renders it in a sandboxed iframe, so there's no host build to keep in step.

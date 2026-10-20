@@ -71,6 +71,46 @@ _CFG: dict[str, str] = dict(_DEFAULTS)
 # than this plugin knowing who its consumers are.
 _EMIT = None
 
+# True once register() got the host to accept the `design-preview` frame component (ADR 0118
+# D5, core >= 0.202.0). Until then show_preview is a no-op: emitting a kind the host never
+# registered would be dropped (or shown as "[unsupported component]").
+_PREVIEWS_ENABLED = False
+
+
+def _previews_mod():
+    return _sibling("previews.py")
+
+
+def _preview_root() -> Path:
+    return _data_dir() / "previews"
+
+
+def _with_preview(text: str, build, show: bool) -> str:
+    """Append an inline preview card to a tool result when the caller asked for one.
+
+    ``build()`` returns ``(payload | None, dropped)``. The snapshot is saved and only its
+    ``{preview_id, title}`` pointer rides the chat. Any failure keeps the tool's real answer
+    and says so in one line: a preview is never worth losing the result over."""
+    if not show:
+        return text
+    if not _PREVIEWS_ENABLED:
+        return text + "\n(Inline preview unavailable: this host has no frame-component support.)"
+    try:
+        payload, dropped = build()
+        if payload is None:
+            return text + "\n(Inline preview unavailable: nothing in this result could be drawn as a preview.)"
+        pv = _previews_mod()
+        ref = pv.save(_preview_root(), payload)
+        from graph.sdk import encode_component
+
+        note = "Inline preview card shown to the user in chat"
+        if dropped:
+            note += f" ({dropped} item(s) omitted: not a literal color or not embeddable)"
+        return text + "\n" + note + ".\n" + encode_component(pv.COMPONENT, ref)
+    except Exception:  # noqa: BLE001 — a preview never costs the tool its answer
+        log.exception("[design-system] could not save an inline preview")
+        return text + "\n(Inline preview unavailable; the values above are still usable.)"
+
 
 def _emit(topic: str, data: dict) -> None:
     if _EMIT is None:
@@ -114,7 +154,9 @@ def _gh_cli_token() -> str:
             out = subprocess.run([gh, "auth", "token"], capture_output=True, text=True, timeout=10)
             if out.returncode == 0:
                 tok = out.stdout.strip()
-        except OSError:
+        except subprocess.TimeoutExpired:
+            return ""  # transient: don't cache "absent", so the next call asks again
+        except (OSError, subprocess.SubprocessError):
             tok = ""
         _CLI_TOKEN = tok
     return _CLI_TOKEN
@@ -167,27 +209,28 @@ def _component_names(entries: list[dict]) -> list[str]:
 
 
 @tool
-def ds_tokens(section: str = "") -> str:
+def ds_tokens(section: str = "", show_preview: bool = False) -> str:
     """The LIVE design-token vocabulary — every ``--pl-*`` custom property with its dark and
     light value. This is the vocabulary you must write styling in: never hardcode a color,
     space, radius, or duration that appears here; use ``var(--pl-…)``.
 
     Pass ``section`` to fetch just one family — "Color", "Space", "Typography", "Elevation",
     "Radius", "Motion", "Gradient", "Border" — when that's all you need; the full set is a few
-    thousand characters and most questions only touch one family."""
+    thousand characters and most questions only touch one family.
+
+    show_preview=True also shows the COLOR tokens of the result to the user as an inline
+    palette card (dark/light pairs, copy value / copy token). Default off: set it only when
+    the user should SEE the colors, not for your own lookups."""
     try:
-        secs = _token_sections()
+        all_secs = _token_sections()
+        secs = all_secs
         want = (section or "").strip().lower()
         if want:
-            secs = [x for x in secs if x["section"].lower() == want]
+            secs = [x for x in all_secs if x["section"].lower() == want]
             if not secs:
-                return f"No token section named {section!r}. Sections: " + ", ".join(
-                    x["section"] for x in _token_sections()
-                )
-        return (
-            "Live design tokens — write var(--pl-…), never the literal:\n"
-            + _tokens_mod().summarize(secs)
-        )
+                return f"No token section named {section!r}. Sections: " + ", ".join(x["section"] for x in all_secs)
+        text = "Live design tokens — write var(--pl-…), never the literal:\n" + _tokens_mod().summarize(secs)
+        return _with_preview(text, lambda: _token_palette(secs, all_secs, section), show_preview)
     except RuntimeError as e:
         # A DS that doesn't publish a built CSS still has the source values worth reading.
         try:
@@ -477,6 +520,30 @@ def _token_sections() -> list[dict]:
     return tk.group_tokens(themes["dark"], themes["light"])
 
 
+def _token_palette(secs: list[dict], all_secs: list[dict], section: str) -> tuple[dict | None, int]:
+    """The color tokens of ``secs`` as a palette payload. ``var()`` values resolve against the
+    WHOLE live set ``all_secs`` (dark and light separately; no second fetch), so an alias token
+    still gets a swatch whichever family it points into."""
+    dark = {t["var"]: t["value"] for sec in all_secs for t in sec["tokens"]}
+    light = {t["var"]: t.get("light", t["value"]) for sec in all_secs for t in sec["tokens"]}
+    groups = [
+        {
+            "name": sec["section"],
+            "swatches": [
+                {"label": t["var"], "value": t["value"], "light": t.get("light", t["value"]), "copy": f"var({t['var']})"}
+                for t in sec["tokens"]
+                # Every Color-family token is offered (an unresolvable one is dropped AND counted,
+                # so the card says so); other families contribute only their literal colors.
+                if sec["section"] == "Color" or t.get("kind") == "color"
+            ],
+        }
+        for sec in secs
+        if sec["section"] in {"Color"} or section
+    ]
+    title = f"Design tokens · {section.strip()}" if section.strip() else "Design tokens · Color"
+    return _previews_mod().palette_payload(title, groups, _theme_mod().parse_rgba, lookup=dark, light_lookup=light)
+
+
 # ── Storybook bridge ──────────────────────────────────────────────────────────
 # A DS that publishes a Storybook already curates the inventory this plugin would
 # otherwise reinvent: every component, every variant, each with a live render. We read
@@ -540,11 +607,15 @@ def ds_stories() -> str:
 
 
 @tool
-def ds_story(name: str) -> str:
+def ds_story(name: str, show_preview: bool = False) -> str:
     """One component's variants, each with a LIVE preview URL you can show the user — e.g.
     'Button', 'Overlays', 'Components/Layout/Grid'. Cheap and pointable: it returns the
     variant list and render URLs, NOT the source. Use ds_component for the story SOURCE
-    (props / API / usage) when you need to read or change the implementation."""
+    (props / API / usage) when you need to read or change the implementation.
+
+    show_preview=True also shows the user an inline card with the LIVE story render and a
+    variant picker. Default off: set it when you are showing the component to the user, not
+    while you research."""
     try:
         comps = _sb_components()
     except RuntimeError as e:
@@ -560,7 +631,8 @@ def ds_story(name: str) -> str:
     for s in comp["stories"]:
         lines.append(f"- {s['name']}: {sb.preview_url(base, s['id'])}")
     lines.append(f"open in Storybook: {sb.docs_url(base, comp['stories'][0]['id'])}" if comp["stories"] else "")
-    return "\n".join(x for x in lines if x)
+    text = "\n".join(x for x in lines if x)
+    return _with_preview(text, lambda: _previews_mod().component_payload(comp, base, sb.preview_url, sb.docs_url), show_preview)
 
 
 _HEX_RE = re.compile(r"#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b")
@@ -1644,20 +1716,27 @@ def _theme_mod():
 
 
 @tool
-def theme_scale(base_color: str, steps: int = 11) -> str:
+def theme_scale(base_color: str, steps: int = 11, show_preview: bool = False) -> str:
     """A perceptually-uniform color scale from one base color — 11 Tailwind-style stops
     (50→950) interpolated through LCH lightness (95→15), so steps LOOK evenly spaced.
     Use for building token families from a brand color. base_color: any opaque CSS color
-    (hex, rgb(), hsl(), oklch(), …). Returns JSON {stop: hex}."""
+    (hex, rgb(), hsl(), oklch(), …). Returns JSON {stop: hex}. show_preview=True also shows
+    the scale to the user as an inline palette card (default off)."""
     _t = _theme_mod()
     try:
-        return json.dumps(dict(zip(_t.SCALE_STOPS, _t.scale(base_color, steps))), indent=1)
+        values = dict(zip(_t.SCALE_STOPS, _t.scale(base_color, steps)))
+        groups = [{"name": "Scale", "swatches": [{"label": str(k), "value": v} for k, v in values.items()]}]
+        return _with_preview(
+            json.dumps(values, indent=1),
+            lambda: _previews_mod().palette_payload(f"Color scale · {base_color.strip()[:60]}", groups, _t.parse_rgba),
+            show_preview,
+        )
     except Exception as exc:  # noqa: BLE001 — tool boundary: legible error string
         return f"Error: {exc}"
 
 
 @tool
-def theme_contrast(foreground: str, background: str) -> str:
+def theme_contrast(foreground: str, background: str, show_preview: bool = False) -> str:
     """WCAG 2.x contrast check for a color pair — ratio plus AA/AA-large/AAA verdicts.
     Check EVERY fg/bg pair you propose; never suggest a failing combination without
     flagging it.
@@ -1669,30 +1748,61 @@ def theme_contrast(foreground: str, background: str) -> str:
     A translucent foreground is composited over the background (the result adds
     foreground_alpha + composited_foreground). A translucent background is refused —
     pass the opaque backdrop behind it (e.g. the nearest ancestor's background-color).
-    Returns JSON {ratio, aa_normal, aa_large, aaa_normal}."""
+    Returns JSON {ratio, aa_normal, aa_large, aaa_normal}.
+
+    show_preview=True also shows the user an inline card: sample text in the pair plus the
+    verdicts. Default off. Check pairs silently; preview only the pair(s) you RECOMMEND or
+    the one the user asked about, typically in your final answer."""
     _t = _theme_mod()
     try:
-        return json.dumps(_t.contrast(foreground, background))
+        result = _t.contrast(foreground, background)
+        return _with_preview(
+            json.dumps(result),
+            lambda: (_previews_mod().contrast_payload(foreground, background, result, _t.parse_rgba), 0),
+            show_preview,
+        )
     except Exception as exc:  # noqa: BLE001
         return f"Error: {exc}"
 
 
 @tool
-def theme_palette(base_color: str, harmony: str = "complementary", mode: str = "dark") -> str:
+def theme_palette(base_color: str, harmony: str = "complementary", mode: str = "dark", show_preview: bool = False) -> str:
     """Design a FULL console palette from one base color: harmony-derived primary/
     secondary/accent scales + fixed semantic hues (success/warning/error/neutral), mapped
     onto the console's --pl-* override keys for the given mode (dark|light), with a WCAG
     contrast report for the key pairs. base_color: any opaque CSS color (hex, rgb(),
     hsl(), oklch(), …). harmony: complementary|triadic|analogous. Review
     the contrast report, then persist with theme_apply. Returns JSON
-    {palette, mode, overrides, contrast}."""
+    {palette, mode, overrides, contrast}. show_preview=True also shows the user an inline
+    palette card with dark/light pairs (default off). Previewing never applies a theme."""
     _t = _theme_mod()
     try:
         pal = _t.palette(base_color, harmony)
         mapped = _t.overrides_for(pal, mode)
-        return json.dumps({"palette": pal, **mapped}, indent=1)
+        return _with_preview(
+            json.dumps({"palette": pal, **mapped}, indent=1),
+            lambda: _palette_preview(_t, pal, harmony, mode),
+            show_preview,
+        )
     except Exception as exc:  # noqa: BLE001
         return f"Error: {exc}"
+
+
+def _palette_preview(_t, pal: dict, harmony: str, mode: str) -> tuple[dict | None, int]:
+    dark = _t.overrides_for(pal, "dark")["overrides"]
+    light = _t.overrides_for(pal, "light")["overrides"]
+    semantic = [
+        {"label": k, "value": v, "light": light.get(k, v), "copy": f"var({k})"}
+        for k, v in dark.items()
+        if isinstance(v, str)
+    ]
+    groups = [{"name": "Console tokens", "swatches": semantic}]
+    groups += [
+        {"name": fam.title(), "swatches": [{"label": f"{fam}-{k}", "value": v} for k, v in stops.items()]}
+        for fam, stops in (pal.get("scales") or {}).items()
+    ]
+    title = f"{str(harmony).title()} palette · {pal.get('base', '')}"
+    return _previews_mod().palette_payload(title, groups, _t.parse_rgba, mode=mode)
 
 
 @tool
@@ -1985,13 +2095,62 @@ def _build_view_router():
             headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'self'"},
         )
 
+    card = Path(__file__).resolve().parent / "preview_card.html"
+
+    @router.get(PREVIEW_FRAME_PATH, include_in_schema=False)
+    def preview_card() -> HTMLResponse:
+        """The ``design-preview`` frame component page (ADR 0118 D5): public (an opaque-origin
+        frame sends no bearer) and data-free. It renders nothing until the console host posts
+        the props, then reads the snapshot through the host's read channel."""
+        return HTMLResponse(card.read_text(encoding="utf-8").replace("__NONCE__", nonce := _nonce()),
+                            headers={"Content-Security-Policy": _preview_card_csp(nonce), "Cache-Control": "no-store"})
+
     return router
+
+
+# The frame page's path under /plugins/design-system — the `frame=` of the component kind and
+# the manifest's public_paths entry (a test pins the three together).
+PREVIEW_FRAME_PATH = "/preview-card"
+
+
+def _nonce() -> str:
+    import secrets
+
+    return secrets.token_urlsafe(18)
+
+
+def _preview_card_csp(nonce: str) -> str:
+    """Lock the frame page down to what it does: its own nonce'd inline script and styles, and
+    nested frames ONLY from the configured Storybook's origin. No fetch/XHR at all — the
+    snapshot arrives through the host's read channel over postMessage."""
+    frame_src = "'none'"
+    try:
+        from urllib.parse import urlsplit
+
+        u = urlsplit(_previews_mod().safe_storybook(_cfg("storybook_url")))
+        frame_src = f"{u.scheme}://{u.netloc}"
+    except ValueError:
+        pass
+    return (
+        f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; img-src data:; "
+        f"frame-src {frame_src}; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+    )
 
 
 def _build_data_router():
     from fastapi import APIRouter
 
     router = APIRouter()
+
+    @router.get("/previews/{preview_id}")
+    def preview(preview_id: str) -> dict:
+        """One saved design preview — what the ``design-preview`` frame reads (host-mediated)."""
+        from fastapi import HTTPException
+
+        snapshot = _previews_mod().read(_preview_root(), preview_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="This preview is no longer available.")
+        return snapshot
 
     @router.get("/catalog")
     def catalog() -> dict:
@@ -2059,8 +2218,25 @@ def _parse_roots(value) -> list[str]:
     return [str(v).strip() for v in value if str(v).strip()]
 
 
+def _register_preview_component(registry) -> bool:
+    """Register the ``design-preview`` frame component (ADR 0118 D5). True when the host took it."""
+    reg = getattr(registry, "register_component", None)
+    if not callable(reg):
+        return False
+    try:
+        pv = _previews_mod()
+        reg(pv.COMPONENT, pv.validate_ref, frame=PREVIEW_FRAME_PATH.lstrip("/"), reads=["previews/*"])
+    except TypeError:  # a host with register_component but no frame=/reads= (< 0.202.0)
+        log.warning("[design-system] host has no frame components; inline previews are off")
+        return False
+    except Exception:  # noqa: BLE001
+        log.exception("[design-system] could not register the design-preview component")
+        return False
+    return True
+
+
 def register(registry) -> None:
-    global _EMIT, _AUDIT_ROOTS
+    global _EMIT, _AUDIT_ROOTS, _PREVIEWS_ENABLED
     cfg = registry.config or {}
     _EMIT = getattr(registry, "emit", None)
     for k in _DEFAULTS:
@@ -2079,6 +2255,7 @@ def register(registry) -> None:
              ds_site_probe_script, ds_audit_url, ds_component_gaps, ds_drift, theme_scale, theme_contrast, theme_palette, theme_export, theme_apply,
              theme_extract, theme_probe_script, theme_generate]
     registry.register_tools(tools)
+    _PREVIEWS_ENABLED = _register_preview_component(registry)
 
     # design-critic subagent (ADR 0018) — reviews a prototype/component against the LIVE DS + a11y,
     # grounded via the ds_* tools above. The lead delegates to it with `task("design-critic", …)`.

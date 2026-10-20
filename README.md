@@ -222,6 +222,55 @@ The workflow — probe 3-5 representative pages → audit → decompose → scre
 report with `show_artifact` → file deduplicated gap issues → hand implementation to the
 `protoEngineer` delegate — is the `auditing-a-site` skill.
 
+## Inline previews in chat — `show_preview=True`
+
+`ds_tokens`, `theme_palette`, `theme_scale`, `theme_contrast` and `ds_story` take an opt-in
+`show_preview` flag (**default `False`**). When it is set, the tool result also carries a
+`design-preview` chat card:
+
+| Card | From | Shows |
+|---|---|---|
+| Palette | `ds_tokens`, `theme_palette`, `theme_scale` | swatch groups, Dark/Light toggle for paired tokens, **Copy value** / **Copy token** |
+| Contrast | `theme_contrast` | sample text painted in the pair, the ratio, AA / AA-large / AAA pass-fail, copy fg/bg |
+| Component | `ds_story` | the **live** Storybook story (variant picker, dark/light), **Open in Storybook ↗** |
+
+**How it renders.** It is a core **frame component** (ADR 0118 D5), not a console build.
+`register_component("design-preview", validate_ref, frame="preview-card", reads=["previews/*"])`.
+The console mounts `/plugins/design-system/preview-card` (listed in `public_paths`) in a
+`sandbox="allow-scripts"` opaque-origin iframe with no bearer. The chat history carries only
+`{preview_id, title}`. The frame asks the host to read `GET /api/plugins/design-system/previews/<id>`
+(gated) on its behalf, through the read channel. The page is served with a nonce CSP:
+`connect-src 'none'`, and nested frames only from the configured `storybook_url` origin.
+
+**Snapshots.** Snapshots live in the instance-scoped plugin store (`previews/previews.db`, SQLite
+in WAL mode, one connection per call, a write lock). A snapshot is immutable, so an old palette
+never adopts new token values. The store keeps the newest **500**, for at most **90 days**. An
+expired card says "no longer available". Each snapshot is capped at 128 KiB.
+
+**Colors are canonicalised per item.** Every color is stored as `#rrggbb` / `#rrggbbaa`, and the
+frame accepts exactly that shape. `var()` references resolve against the live token set.
+`color-mix()`, `currentColor` and dangling vars are dropped and counted ("N items left out"). A
+bad swatch never sinks the card. The frame re-validates on read with the same pattern.
+
+**What the sandbox allows (spike, 2026-10-19).** These are the console frame's real constraints:
+
+- **Nested Storybook iframe: works.** It inherits the opaque origin. The protoContent Storybook
+  renders fine without storage, in Chromium and in WebKit (the desktop app).
+- **Clipboard:** the host grants the frame no `clipboard-write`, so Chromium blocks
+  `navigator.clipboard`. `document.execCommand("copy")` on the click still works in Chromium and
+  WebKit. If both fail, the card **selects the value** and says "press ⌘C".
+- **Links:** popups are sandboxed off. **Open in Storybook** goes through the host's `openLink`
+  bridge, which asks the operator to confirm.
+- **Descoped:** the core draft's *Open playground* button (post a story into the explorer
+  view). A frame component cannot address a plugin view, so the card links to Storybook
+  instead.
+
+Transient read failures (a paused frame, a 5xx) retry with backoff (1 s → 16 s, 5 tries), plus
+a **Retry** button and a retry when the tab becomes visible again. Only a 404 is final.
+
+Requires core **≥ 0.202.0** (`min_protoagent_version`). On an older host the tools work as
+before and `show_preview` only adds a one-line "unavailable" note.
+
 ## The explorer — a browse surface, and only that
 
 The plugin serves one console view (**Design System** in the right rail, also reachable from
