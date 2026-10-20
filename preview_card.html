@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Design preview</title>
+<!-- The DS plugin kit: the console's own .pl-btn look and --pl-* defaults. RELATIVE, so it is
+     slug-aware (<base>/_ds/plugin-kit.css on the host and through the fleet proxy). /_ds/ is on
+     core's auth public allowlist, so this opaque-origin frame can load it without a bearer.
+     Linked BEFORE the inline style: the host's live theme tokens (set on :root's inline style)
+     still win, and the inline :where() fallbacks below lose to the kit whenever it loads. -->
+<link rel="stylesheet" href="../../_ds/plugin-kit.css">
 <!--
   The `design-preview` FRAME component (ADR 0118 D5). The console mounts this page in a
   sandbox="allow-scripts" iframe with NO same-origin: an opaque origin, no bearer, no storage.
@@ -37,22 +43,38 @@
   html, body { margin: 0; background: transparent; }
   body { font: var(--sm)/1.45 var(--pl-font-sans, system-ui, sans-serif); color: var(--fg); }
   .card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--raised); padding: var(--s3); }
-  .head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--s2); margin-bottom: var(--s2); }
+  /* The top-right corner belongs to the console: core's FrameComponentHost overlays its hover-only
+     "Click to interact" hint there (.frame-guard__hint, ~8rem wide, 4px in). Nothing of ours
+     sits in that corner: the title row stops short of it and the saved/live note is a footer. */
+  .head { padding-right: 8.5rem; margin-bottom: var(--s2); min-height: 1.4em; }
   h2 { font-size: var(--sm); margin: 0; font-weight: 600; }
   .meta, .note { color: var(--muted); font-size: var(--xs); }
   .note { margin: var(--s2) 0 0; }
   code { font-family: var(--mono); font-size: var(--xs); }
   .row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-block: var(--s2); }
-  button, select {
-    font: inherit; font-size: var(--xs); color: var(--fg); background: var(--inset);
-    border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); padding: 3px 8px; cursor: pointer;
+  /* Buttons are the kit's `pl-btn pl-btn--sm`. These :where() rules mirror the kit's values at
+     zero specificity: they style the card if the kit can't load, and lose to it when it does. */
+  :where(.pl-btn) {
+    display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.5rem 0.9rem;
+    font-family: var(--pl-font-sans, system-ui, sans-serif); font-size: 13px; font-weight: 400; line-height: 1.2;
+    color: var(--fg); background: transparent; border: var(--pl-border-width, 1px) solid var(--pl-color-border-strong, #3a3a44);
+    border-radius: var(--radius); cursor: pointer;
+    transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
   }
-  button:hover, select:hover { border-color: var(--muted); }
+  :where(.pl-btn:hover) { border-color: var(--fg); }
+  :where(.pl-btn--sm) { padding: 0.3rem 0.6rem; font-size: 12px; }
+  select {
+    font: inherit; font-size: 12px; color: var(--fg); background: transparent; padding: 0.3rem 0.6rem;
+    border: var(--pl-border-width, 1px) solid var(--pl-color-border-strong, #3a3a44); border-radius: var(--radius); cursor: pointer;
+  }
+  select:hover { border-color: var(--fg); }
+  select option { background: var(--raised); color: var(--fg); }
   button:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-  /* Pressed toggles are visibly different, not only aria-pressed: accent fill + a check mark. */
-  button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
-  button[aria-pressed="true"]::before { content: "\2713\00a0"; }
-  button.done { border-color: var(--ok); }
+  /* Pressed toggles are visibly different, not only aria-pressed: the kit's strong (fg) fill, the
+     same look as a primary button's hover, plus a check mark. */
+  .pl-btn[aria-pressed="true"], .pl-btn[aria-pressed="true"]:hover { background: var(--fg); color: var(--bg); border-color: var(--fg); font-weight: 600; }
+  .pl-btn[aria-pressed="true"]::before { content: "\2713"; }
+  .pl-btn.done, .pl-btn.done:hover { border-color: var(--ok); color: var(--ok); }
   details { margin-block: var(--s2); }
   summary { cursor: pointer; font-weight: 600; padding-block: 2px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); gap: var(--s3); margin-top: var(--s2); }
@@ -78,8 +100,9 @@
 </head>
 <body>
 <div class="card" id="card" aria-busy="true">
-  <div class="head"><h2 id="title">Design preview</h2><span class="meta" id="meta"></span></div>
+  <div class="head"><h2 id="title">Design preview</h2></div>
   <div id="body"><p class="meta" id="state">Loading preview…</p></div>
+  <p class="note" id="meta"></p>
 </div>
 <!-- ONE polite live region for the whole card (copy feedback, load state). Not one per swatch. -->
 <div id="announce" class="sr" role="status" aria-live="polite"></div>
@@ -96,6 +119,12 @@
   var pair = (location.hash.match(/pair=([0-9a-f]+)/) || [])[1] || "";
   var nonce = null, cid = 0, pending = {}, ref = null, attempts = 0, retryTimer = null, loading = false, failed = false;
   var $ = function (id) { return document.getElementById(id); };
+  // Every button is the kit's small button, so the card matches the console's controls.
+  function btn(attrs) {
+    var b = el("button", attrs);
+    b.className = "pl-btn pl-btn--sm" + (attrs.cls ? " " + attrs.cls : "");
+    return b;
+  }
 
   function post(msg) { try { parent.postMessage(msg, "*"); } catch (e) { /* detached */ } }
   function el(tag, attrs, kids) {
@@ -212,7 +241,7 @@
     var p = el("p", { cls: "err", text: text });
     body.appendChild(p);
     if (retryable) {
-      var b = el("button", { type: "button", text: "Retry" });
+      var b = btn({ type: "button", text: "Retry" });
       b.addEventListener("click", function () { attempts = 0; load(); });
       body.appendChild(el("div", { cls: "row" }, [b]));
     }
@@ -330,7 +359,7 @@
     setTimeout(function () { btn.textContent = btn.getAttribute("data-label"); }, 2500);
   }
   function copyButton(text, visible, describe, selectEl) {
-    var b = el("button", { type: "button", "data-label": visible, "aria-label": visible + ": " + describe, text: visible });
+    var b = btn({ type: "button", "data-label": visible, "aria-label": visible + ": " + describe, text: visible });
     b.addEventListener("click", function () { copy(text, b, selectEl); });
     return b;
   }
@@ -352,7 +381,7 @@
   function toggleGroup(labelText, options, current, onPick) {
     var g = el("div", { cls: "row", role: "group", "aria-label": labelText });
     var buttons = options.map(function (o) {
-      var b = el("button", { type: "button", "aria-pressed": String(o[0] === current), text: o[1] });
+      var b = btn({ type: "button", "aria-pressed": String(o[0] === current), text: o[1] });
       b.addEventListener("click", function () {
         buttons.forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
         onPick(o[0]);
@@ -389,7 +418,7 @@
     }
     det.appendChild(grid);
     if (!showAll) {
-      var more = el("button", { type: "button", "aria-expanded": "false", text: "Show all " + g.swatches.length });
+      var more = btn({ type: "button", "aria-expanded": "false", text: "Show all " + g.swatches.length });
       more.addEventListener("click", function () {
         showAll = !showAll;
         more.setAttribute("aria-expanded", String(showAll));
@@ -449,7 +478,7 @@
     d.stories.forEach(function (s, i) { sel.appendChild(el("option", { value: String(i), text: s.name })); });
     var frameBox = el("div");
     var status = el("p", { cls: "note" });
-    var openBtn = el("button", { type: "button", text: "Open in Storybook ↗" });
+    var openBtn = btn({ type: "button", text: "Open in Storybook ↗" });
     var loadTimer = null;
     function draw() {
       var s = d.stories[idx];

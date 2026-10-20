@@ -2120,7 +2120,8 @@ def _nonce() -> str:
 
 
 def _preview_card_csp(nonce: str) -> str:
-    """Lock the frame page down to what it does: its own nonce'd inline script and styles, and
+    """Lock the frame page down to what it does: its own nonce'd inline script, inline styles plus
+    the same-origin DS kit stylesheet (``/_ds/plugin-kit.css``), and
     nested frames ONLY from the configured Storybook's origin. No fetch/XHR at all — the
     snapshot arrives through the host's read channel over postMessage."""
     frame_src = "'none'"
@@ -2132,7 +2133,7 @@ def _preview_card_csp(nonce: str) -> str:
     except ValueError:
         pass
     return (
-        f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; img-src data:; "
+        f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; img-src data:; "
         f"frame-src {frame_src}; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
     )
 
