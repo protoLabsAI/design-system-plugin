@@ -204,3 +204,29 @@ python -m server plugin install https://github.com/protoLabsAI/design-system-plu
 - `ds_check` beyond hex: spacing/radius/type literals, Tailwind arbitrary values (`[#…]`, `[13px]`).
 - component-level a11y hints from the stories; a `doc-sync` companion that opens the docs PR the
   drift watch describes.
+
+
+## Inline previews in chat
+
+On a console with the `design-preview-ref` renderer, `theme_palette`, `theme_scale`,
+`theme_contrast`, and `ds_story` show inline cards. Use
+`ds_tokens(section="Color", show_preview=True)` to show existing color tokens;
+set `show_preview=False` on the other tools for research-only results.
+
+Palette cards offer dark/light values and copy controls. Contrast cards display
+the actual foreground/background pair and WCAG results. Component cards embed
+real Storybook variants and can open the existing playground. The Storybook render
+is explicitly live; its saved variant list can outlive a published story.
+
+The plugin stores immutable snapshots in its instance-scoped `previews/previews.db`
+via `graph.sdk.plugin_store`. Chat history contains only a preview id and title.
+`GET /api/plugins/design-system/previews/{preview_id}` is an authenticated data
+route; missing snapshots return 404. Snapshots remain until the plugin store is
+removed, so old palettes never silently adopt new token values. Exported chat
+references still require the owning instance's preview store. Each snapshot is
+limited to 128 KiB. No scripts or generated markup are stored in palette cards.
+
+This requires both the updated plugin and the matching protoAgent console build.
+Hosts without component registration retain text/JSON results. A host with the
+registration seam but an older console displays an unsupported-component note;
+update the console to enable rendering.

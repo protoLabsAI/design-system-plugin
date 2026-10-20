@@ -34,8 +34,8 @@ Lead with the answer, then the evidence. Cite the exact token and the exact vari
 answer — follow it with the primitives to compose one from, and label any extension you propose
 as a *proposal*, not as something that exists.
 
-For an inventory or a token family, render it with `show_component` (a `table` or `keyvalue`)
-rather than a prose blob — it is structured data and reads far better inline.
+For colors, use the inline design cards described below. For other inventories or token
+families, use `show_component` (a `table` or `keyvalue`) so the user can scan the values.
 
 ## Building or styling UI
 
@@ -63,3 +63,19 @@ Shipping is a **pull request**, and a human merges it. Prototype → critique �
 `ds_drift` reports what changed since the last check and broadcasts `design-system.drift-detected`.
 When tokens move or components come and go, the docs and consuming surfaces need reconciling —
 that is a PR or a finding, not a shrug.
+
+
+## Inline design cards
+
+When presenting colors to the user, call `theme_palette`, `theme_scale`, or
+`theme_contrast`: they show saved palette/contrast cards directly in chat. For the
+existing token vocabulary, call `ds_tokens(section="Color", show_preview=True)`.
+Cards support copying values and token references; palette cards show dark/light
+pairs. A preview does not apply a theme — use `theme_apply` only when asked.
+
+Use `ds_story(name)` to show a real component with a variant picker and an
+**Open playground** action. These previews show the current published Storybook,
+not a frozen rendering. Use artifacts for newly proposed components or layouts.
+Set `show_preview=False` on research-only calls to avoid cluttering the conversation.
+Do not pass `design-preview-ref` to `show_component`; these tools own the saved
+preview and emit its reference. Older consoles may need an update to render cards.

@@ -63,6 +63,27 @@ _CFG: dict[str, str] = dict(_DEFAULTS)
 # each other (ADR 0039) — so drift is BROADCAST and anything that cares subscribes, rather
 # than this plugin knowing who its consumers are.
 _EMIT = None
+_PREVIEWS_ENABLED = False
+
+
+def _preview_root():
+    from graph.sdk import plugin_store
+
+    return plugin_store("previews", plugin_id="design-system")
+
+
+def _with_preview(text: str, payload: dict, show: bool = True) -> str:
+    if not show or not _PREVIEWS_ENABLED:
+        return text
+    try:
+        from graph.sdk import encode_component
+
+        previews = _sibling("previews.py")
+        ref = previews.save(_preview_root(), payload)
+        return text + "\n" + encode_component(previews.COMPONENT, ref)
+    except Exception:  # noqa: BLE001 — retain the useful result if storage is unavailable
+        log.exception("[design-system] could not save inline preview")
+        return text + "\nInline preview unavailable; the values above are still usable."
 
 
 def _emit(topic: str, data: dict) -> None:
@@ -155,14 +176,15 @@ def _component_names(entries: list[dict]) -> list[str]:
 
 
 @tool
-def ds_tokens(section: str = "") -> str:
+def ds_tokens(section: str = "", show_preview: bool = False) -> str:
     """The LIVE design-token vocabulary — every ``--pl-*`` custom property with its dark and
     light value. This is the vocabulary you must write styling in: never hardcode a color,
     space, radius, or duration that appears here; use ``var(--pl-…)``.
 
     Pass ``section`` to fetch just one family — "Color", "Space", "Typography", "Elevation",
     "Radius", "Motion", "Gradient", "Border" — when that's all you need; the full set is a few
-    thousand characters and most questions only touch one family."""
+    thousand characters and most questions only touch one family. Set show_preview=True
+    to present color tokens as a saved inline palette with dark/light values."""
     try:
         secs = _token_sections()
         want = (section or "").strip().lower()
@@ -172,10 +194,13 @@ def ds_tokens(section: str = "") -> str:
                 return f"No token section named {section!r}. Sections: " + ", ".join(
                     x["section"] for x in _token_sections()
                 )
-        return (
-            "Live design tokens — write var(--pl-…), never the literal:\n"
-            + _tokens_mod().summarize(secs)
-        )
+        text = "Live design tokens — write var(--pl-…), never the literal:\n" + _tokens_mod().summarize(secs)
+        groups = [{"name": sec["section"], "swatches": [
+            {"label": t["var"], "value": t["value"], "light": t.get("light") or t["value"], "copy": f"var({t['var']})"}
+            for t in sec["tokens"] if t.get("kind") == "color"
+        ]} for sec in secs]
+        groups = [group for group in groups if group["swatches"]]
+        return _with_preview(text, {"kind": "palette", "title": "Design tokens", "groups": groups}, show_preview and bool(groups))
     except RuntimeError as e:
         # A DS that doesn't publish a built CSS still has the source values worth reading.
         try:
@@ -368,10 +393,11 @@ def ds_stories() -> str:
 
 
 @tool
-def ds_story(name: str) -> str:
+def ds_story(name: str, show_preview: bool = True) -> str:
     """One component's variants, each with a LIVE preview URL you can show the user — e.g.
     'Button', 'Overlays', 'Components/Layout/Grid'. Cheap and pointable: it returns the
-    variant list and render URLs, NOT the source. Use ds_component for the story SOURCE
+    variant list and render URLs, NOT the source. Also shows a live inline component
+    card; set show_preview=False when only researching. Use ds_component for the story SOURCE
     (props / API / usage) when you need to read or change the implementation."""
     try:
         comps = _sb_components()
@@ -388,7 +414,19 @@ def ds_story(name: str) -> str:
     for s in comp["stories"]:
         lines.append(f"- {s['name']}: {sb.preview_url(base, s['id'])}")
     lines.append(f"open in Storybook: {sb.docs_url(base, comp['stories'][0]['id'])}" if comp["stories"] else "")
-    return "\n".join(x for x in lines if x)
+    text = "\n".join(x for x in lines if x)
+    if not show_preview or not comp["stories"]:
+        return text
+    try:
+        base = _sibling("previews.py").safe_storybook(base)
+    except ValueError as exc:
+        return text + f"\nInline preview unavailable: {exc}"
+    return _with_preview(text, {
+        "kind": "component", "title": comp["label"], "component_title": comp["title"],
+        "storybook_url": base,
+        "stories": [{"id": s["id"], "name": s["name"], "preview": sb.preview_url(base, s["id"]),
+                     "docs": sb.docs_url(base, s["id"])} for s in comp["stories"]],
+    })
 
 
 _HEX_RE = re.compile(r"#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b")
@@ -689,42 +727,66 @@ def _theme_mod():
 
 
 @tool
-def theme_scale(base_color: str, steps: int = 11) -> str:
+def theme_scale(base_color: str, steps: int = 11, show_preview: bool = True) -> str:
     """A perceptually-uniform color scale from one base color — 11 Tailwind-style stops
     (50→950) interpolated through LCH lightness (95→15), so steps LOOK evenly spaced.
-    Use for building token families from a brand color. Returns JSON {stop: hex}."""
+    Use for building token families from a brand color. Returns JSON {stop: hex}
+    and a saved inline palette. Set show_preview=False for research-only calls."""
     _t = _theme_mod()
     try:
-        return json.dumps(dict(zip(_t.SCALE_STOPS, _t.scale(base_color, steps))), indent=1)
+        values = dict(zip(_t.SCALE_STOPS, _t.scale(base_color, steps)))
+        return _with_preview(json.dumps(values, indent=1), {
+            "kind": "palette", "title": f"Color scale · {base_color}",
+            "groups": [{"name": "Scale", "swatches": [{"label": str(k), "value": v} for k, v in values.items()]}],
+        }, show_preview)
     except Exception as exc:  # noqa: BLE001 — tool boundary: legible error string
         return f"Error: {exc}"
 
 
 @tool
-def theme_contrast(foreground: str, background: str) -> str:
+def theme_contrast(foreground: str, background: str, show_preview: bool = True) -> str:
     """WCAG 2.x contrast check for a color pair — ratio plus AA/AA-large/AAA verdicts.
     Check EVERY fg/bg pair you propose; never suggest a failing combination without
-    flagging it. Returns JSON."""
+    flagging it. Returns JSON and a saved inline contrast card. Set show_preview=False
+    for research-only calls."""
     _t = _theme_mod()
     try:
-        return json.dumps(_t.contrast(foreground, background))
+        result = _t.contrast(foreground, background)
+        return _with_preview(json.dumps(result), {
+            "kind": "contrast", "title": "Color contrast", "foreground": _t._norm_hex(foreground),
+            "background": _t._norm_hex(background), **result,
+        }, show_preview)
     except Exception as exc:  # noqa: BLE001
         return f"Error: {exc}"
 
 
 @tool
-def theme_palette(base_color: str, harmony: str = "complementary", mode: str = "dark") -> str:
+def theme_palette(base_color: str, harmony: str = "complementary", mode: str = "dark", show_preview: bool = True) -> str:
     """Design a FULL console palette from one base color: harmony-derived primary/
     secondary/accent scales + fixed semantic hues (success/warning/error/neutral), mapped
     onto the console's --pl-* override keys for the given mode (dark|light), with a WCAG
     contrast report for the key pairs. harmony: complementary|triadic|analogous. Review
     the contrast report, then persist with theme_apply. Returns JSON
-    {palette, mode, overrides, contrast}."""
+    {palette, mode, overrides, contrast} and a saved inline palette with dark/light pairs.
+    Set show_preview=False for research-only calls. Previewing does not apply a theme."""
     _t = _theme_mod()
     try:
         pal = _t.palette(base_color, harmony)
         mapped = _t.overrides_for(pal, mode)
-        return json.dumps({"palette": pal, **mapped}, indent=1)
+        dark = _t.overrides_for(pal, "dark")["overrides"]
+        light = _t.overrides_for(pal, "light")["overrides"]
+        groups = [{"name": "Semantic tokens", "swatches": [
+            {"label": key, "value": value, "light": light[key], "copy": f"var({key})"}
+            for key, value in dark.items()
+        ]}]
+        key_tokens = {"--pl-color-accent", "--pl-color-status-info", "--pl-color-status-success",
+                      "--pl-color-status-warning", "--pl-color-status-error", "--pl-color-bg"}
+        groups.insert(0, {"name": "Key colors", "swatches": [s for s in groups[0]["swatches"] if s["label"] in key_tokens]})
+        groups.extend({"name": family, "swatches": [{"label": str(k), "value": v} for k, v in stops.items()]}
+                      for family, stops in pal["scales"].items())
+        return _with_preview(json.dumps({"palette": pal, **mapped}, indent=1), {
+            "kind": "palette", "title": f"{harmony.title()} palette · {pal['base']}", "mode": mode, "groups": groups,
+        }, show_preview)
     except Exception as exc:  # noqa: BLE001
         return f"Error: {exc}"
 
@@ -782,9 +844,16 @@ def _build_view_router():
 
 
 def _build_data_router():
-    from fastapi import APIRouter
+    from fastapi import APIRouter, HTTPException
 
     router = APIRouter()
+
+    @router.get("/previews/{preview_id}")
+    def preview(preview_id: str) -> dict:
+        snapshot = _sibling("previews.py").read(_preview_root(), preview_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="Design preview is no longer available")
+        return snapshot
 
     @router.get("/catalog")
     def catalog() -> dict:
@@ -841,7 +910,12 @@ def _build_data_router():
 
 
 def register(registry) -> None:
-    global _EMIT
+    global _EMIT, _PREVIEWS_ENABLED
+    register_component = getattr(registry, "register_component", None)
+    _PREVIEWS_ENABLED = callable(register_component)
+    if _PREVIEWS_ENABLED:
+        previews = _sibling("previews.py")
+        register_component(previews.COMPONENT, previews.validate_ref)
     cfg = registry.config or {}
     _EMIT = getattr(registry, "emit", None)
     for k in _DEFAULTS:

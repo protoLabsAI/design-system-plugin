@@ -270,6 +270,36 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+let DATA = null, active = null, tab = "foundations";
+const PG = { storyId: null, prepared: null, args: {}, width: "fill", theme: "auto" };
+
+// Install before the ready handshake: chat may open a previously unmounted panel.
+let pendingStory = null;
+window.addEventListener("message", (e) => {
+  if (e.source !== window.parent) return;
+  const parentOrigin = location.ancestorOrigins && location.ancestorOrigins[0];
+  if (parentOrigin && e.origin !== parentOrigin) return;
+  if (e.data?.type !== "design-system:select-story" || typeof e.data.story_id !== "string" || e.data.story_id.length > 200) return;
+  pendingStory = e.data.story_id;
+  applyPendingStory();
+});
+function applyPendingStory() {
+  if (!pendingStory || !DATA) return;
+  const comp = DATA.groups.flatMap(g => g.components).find(c => c.stories.some(s => s.id === pendingStory));
+  if (!comp) {
+    $("status").textContent = "That story is no longer in the published catalog.";
+    $("status").classList.remove("hide");
+    pendingStory = null;
+    return;
+  }
+  active = comp.title;
+  PG.storyId = pendingStory;
+  PG.prepared = null; PG.args = {};
+  pendingStory = null;
+  $("q").value = "";
+  $("tabs").querySelector("[data-tab='playground']").click();
+}
+
 let kit;
 try {
   // plugin-kit.js is an ES module AND the URL is slug-dependent, so it must be a dynamic
@@ -290,7 +320,7 @@ try {
   throw err;
 }
 
-let DATA = null, active = null, tab = "foundations";
+
 
 // The console hands the kit a CURATED palette ({bg, fg, brand, …}), not a mode name — so
 // read the mode back off the token the kit actually applied. Rendering each story in the
@@ -497,7 +527,7 @@ function renderComponent() {
 // same message its manager UI sends. So the controls here manipulate the REAL component
 // live — no reload, no reimplementation of its rendering.
 
-const PG = { storyId: null, prepared: null, args: {}, width: "fill", theme: "auto" };
+
 
 // Storybook serialises its channel with telejson, which replaces any structure that already
 // appeared in the message with a marker string: `_duplicate_["event","args","0","initialArgs"]`
@@ -701,6 +731,7 @@ async function load() {
   const all = DATA.groups.flatMap((g) => g.components);
   active = active || (all.find((c) => c.label === "Button") || all[0] || {}).title || null;
   render();
+  applyPendingStory();
 }
 
 $("tabs").addEventListener("click", (e) => {

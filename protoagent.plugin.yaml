@@ -1,6 +1,6 @@
 id: design-system
 name: Design System
-version: 0.7.1
+version: 0.8.0
 
 # The newest host seam this plugin depends on: TYPED `emits:` contracts (#1636, core 0.99.0).
 # `registry.emit` itself landed in 0.31.0 and `views[].palette` in 0.71.0, so 0.99.0 is the
@@ -49,7 +49,7 @@ capabilities:
   # is operator-set, so the default is declared and an operator who repoints it is choosing
   # the new host knowingly.
   network: ["api.github.com", "protocontent-storybook.pages.dev"]
-  filesystem: scoped            # one small drift snapshot in the instance data dir
+  filesystem: scoped            # drift state and immutable inline preview snapshots
 
 # Auth: the GitHub contents API is read with GITHUB_TOKEN / GH_TOKEN from the env (protoContent
 # is private). Same token the github plugin uses; no separate plugin secret.

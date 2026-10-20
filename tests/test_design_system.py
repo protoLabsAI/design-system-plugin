@@ -692,7 +692,7 @@ def test_the_plugin_serves_no_chat_or_preview_routes():
     box or preview frame here is a second renderer, a second escape path and a second loading
     state to maintain, all duplicating core."""
     paths = {r.path for r in ds._build_data_router().routes}
-    assert paths == {"/catalog", "/refresh"}, paths
+    assert paths == {"/catalog", "/refresh", "/previews/{preview_id}"}, paths
     html = _view_html()
     for gone in ("miniMarkdown", "renderAsk", "renderDesign", 'data-tab="ask"', 'data-tab="design"'):
         assert gone not in html, f"{gone} is back"
