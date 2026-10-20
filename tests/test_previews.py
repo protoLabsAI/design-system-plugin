@@ -355,6 +355,7 @@ def test_frame_page_is_served_at_the_public_path_with_a_locked_csp(monkeypatch):
     nonce = re.search(r"'nonce-([^']+)'", csp).group(1)
     assert f'<script nonce="{nonce}">' in r.text and "__NONCE__" not in r.text
     assert "frame-src https://sb.example.com;" in csp and "connect-src 'none'" in csp
+    assert "style-src 'self' 'unsafe-inline'" in csp  # the same-origin DS kit stylesheet
     assert c.get("/plugins/design-system" + ds.PREVIEW_FRAME_PATH).headers["content-security-policy"] != csp  # fresh nonce
     assert c.get("/api/plugins/design-system" + ds.PREVIEW_FRAME_PATH).status_code == 404  # page is not a data route
 
@@ -380,7 +381,30 @@ def test_frame_page_follows_the_protocol_and_builds_dom_safely():
     assert "protoComponent:openLink" in html  # popups are sandboxed off; the host opens links
     assert "innerHTML" not in html and not re.search(r"\son[a-z]+=", html)  # no markup injection, no inline handlers
     assert html.count('role="status"') == 1  # ONE live region, not one per swatch
-    assert 'button[aria-pressed="true"]' in html  # a visible pressed state
+    assert '.pl-btn[aria-pressed="true"]' in html  # a visible pressed state
+    assert 'el("button"' in html and html.count('el("button"') == 1  # every button via btn(): the kit's classes
+    assert '"pl-btn pl-btn--sm"' in html
+
+
+def test_frame_uses_the_ds_kit_slug_aware():
+    """The card's controls are the console's: the DS kit, linked RELATIVE so the fleet proxy's
+    /agents/<slug>/ prefix carries through (frame at <base>/plugins/design-system/preview-card)."""
+    from urllib.parse import urljoin
+
+    html = (ROOT / "preview_card.html").read_text()
+    href = re.search(r'<link rel="stylesheet" href="([^"]+)">', html).group(1)
+    assert urljoin("https://h/plugins/design-system/preview-card", href) == "https://h/_ds/plugin-kit.css"
+    assert urljoin("https://h/agents/x/plugins/design-system/preview-card", href) == "https://h/agents/x/_ds/plugin-kit.css"
+    assert html.index("<link") < html.index("<style>")  # inline fallbacks + theme tokens come after
+    assert ":where(.pl-btn)" in html  # zero-specificity fallback, loses to the kit
+
+
+def test_header_keeps_the_hosts_hint_corner_clear():
+    """Core's FrameComponentHost overlays a hover-only "Click to interact" hint at the frame's top
+    right. The card puts nothing there: the title row reserves the corner, the meta is a footer."""
+    html = (ROOT / "preview_card.html").read_text()
+    assert re.search(r"\.head \{[^}]*padding-right: 8\.5rem", html)
+    assert '<div class="head"><h2 id="title">Design preview</h2></div>' in html
     assert "protoComponent:height" in html
 
 
