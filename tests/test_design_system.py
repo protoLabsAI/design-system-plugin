@@ -693,9 +693,13 @@ def test_designer_renders_through_the_artifact_plugin():
 def test_the_plugin_serves_no_chat_or_preview_routes():
     """REGRESSION: protoAgent already has a chat system and an artifact plugin. A bespoke ask
     box or preview frame here is a second renderer, a second escape path and a second loading
-    state to maintain, all duplicating core."""
+    state to maintain, all duplicating core.
+
+    The one data route added since is ``/previews/{preview_id}``: a saved snapshot that core's
+    OWN frame-component host (ADR 0118 D5) reads for the ``design-preview`` chat card. Core
+    renders and fences it; the plugin only stores data."""
     paths = {r.path for r in ds._build_data_router().routes}
-    assert paths == {"/catalog", "/refresh"}, paths
+    assert paths == {"/catalog", "/refresh", "/previews/{preview_id}"}, paths
     html = _view_html()
     for gone in ("miniMarkdown", "renderAsk", "renderDesign", 'data-tab="ask"', 'data-tab="design"'):
         assert gone not in html, f"{gone} is back"
