@@ -154,7 +154,9 @@ def _gh_cli_token() -> str:
             out = subprocess.run([gh, "auth", "token"], capture_output=True, text=True, timeout=10)
             if out.returncode == 0:
                 tok = out.stdout.strip()
-        except OSError:
+        except subprocess.TimeoutExpired:
+            return ""  # transient: don't cache "absent", so the next call asks again
+        except (OSError, subprocess.SubprocessError):
             tok = ""
         _CLI_TOKEN = tok
     return _CLI_TOKEN
@@ -220,16 +222,15 @@ def ds_tokens(section: str = "", show_preview: bool = False) -> str:
     palette card (dark/light pairs, copy value / copy token). Default off: set it only when
     the user should SEE the colors, not for your own lookups."""
     try:
-        secs = _token_sections()
+        all_secs = _token_sections()
+        secs = all_secs
         want = (section or "").strip().lower()
         if want:
-            secs = [x for x in secs if x["section"].lower() == want]
+            secs = [x for x in all_secs if x["section"].lower() == want]
             if not secs:
-                return f"No token section named {section!r}. Sections: " + ", ".join(
-                    x["section"] for x in _token_sections()
-                )
+                return f"No token section named {section!r}. Sections: " + ", ".join(x["section"] for x in all_secs)
         text = "Live design tokens — write var(--pl-…), never the literal:\n" + _tokens_mod().summarize(secs)
-        return _with_preview(text, lambda: _token_palette(secs, section), show_preview)
+        return _with_preview(text, lambda: _token_palette(secs, all_secs, section), show_preview)
     except RuntimeError as e:
         # A DS that doesn't publish a built CSS still has the source values worth reading.
         try:
@@ -519,17 +520,12 @@ def _token_sections() -> list[dict]:
     return tk.group_tokens(themes["dark"], themes["light"])
 
 
-def _token_palette(secs: list[dict], section: str) -> tuple[dict | None, int]:
+def _token_palette(secs: list[dict], all_secs: list[dict], section: str) -> tuple[dict | None, int]:
     """The color tokens of ``secs`` as a palette payload. ``var()`` values resolve against the
-    whole live set (dark and light separately), so an alias token still gets a swatch."""
-    dark = {t["var"]: t["value"] for sec in secs for t in sec["tokens"]}
-    light = {t["var"]: t.get("light", t["value"]) for sec in secs for t in sec["tokens"]}
-    try:  # widen the lookup to every section, so a Color alias can point at any family
-        all_secs = _token_sections() if section else secs
-        dark = {t["var"]: t["value"] for sec in all_secs for t in sec["tokens"]} | dark
-        light = {t["var"]: t.get("light", t["value"]) for sec in all_secs for t in sec["tokens"]} | light
-    except RuntimeError:
-        pass
+    WHOLE live set ``all_secs`` (dark and light separately; no second fetch), so an alias token
+    still gets a swatch whichever family it points into."""
+    dark = {t["var"]: t["value"] for sec in all_secs for t in sec["tokens"]}
+    light = {t["var"]: t.get("light", t["value"]) for sec in all_secs for t in sec["tokens"]}
     groups = [
         {
             "name": sec["section"],

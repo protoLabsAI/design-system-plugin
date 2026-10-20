@@ -7,6 +7,9 @@ version: 0.14.0
 # #4143), first shipped in core 0.202.0; inline design previews render through it. Older seams
 # it also uses: typed `emits:` contracts (0.99.0), `views[].palette` (0.71.0), `registry.emit`
 # (0.31.0). Declared because each degrades SILENTLY on an older host.
+# Deliberately a hard floor, not a soft fallback: fleet policy (Josh, 2026-09-27) is that a
+# plugin raises its core floor freely and old-core agents upgrade. The runtime guard
+# (_register_preview_component) only keeps a mis-pinned host from crashing on load.
 min_protoagent_version: "0.202.0"
 description: >-
   The agent's live window into a design system, and a console surface for browsing one. Reads

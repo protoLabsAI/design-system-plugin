@@ -382,3 +382,25 @@ def test_frame_page_follows_the_protocol_and_builds_dom_safely():
     assert html.count('role="status"') == 1  # ONE live region, not one per swatch
     assert 'button[aria-pressed="true"]' in html  # a visible pressed state
     assert "protoComponent:height" in html
+
+
+def test_gh_cli_timeout_is_not_cached_as_absent(monkeypatch):
+    import subprocess
+
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise subprocess.TimeoutExpired(cmd="gh", timeout=10)
+
+    monkeypatch.setattr(ds, "_CLI_TOKEN", None)
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert ds._gh_cli_token() == "" and ds._gh_cli_token() == ""
+    assert len(calls) == 2 and ds._CLI_TOKEN is None  # retried, never cached
+
+
+def test_unknown_section_fetches_once(monkeypatch):
+    fetches = []
+    monkeypatch.setattr(ds, "_gh_get_raw", lambda path: fetches.append(path) or ":root{--pl-color-bg:#000}")
+    out = ds.ds_tokens.invoke({"section": "Nope"})
+    assert "No token section" in out and len(fetches) == 1
