@@ -340,14 +340,18 @@ already gives sandboxed rendering, versioning, `update_artifact`/`rewrite_artifa
 verdict, so this plugin doesn't reimplement any of it. Those two tools are named in its
 allowlist rather than imported: plugins coordinate through the host, never by importing each
 other (ADR 0039). An unresolved name is skipped, so with the artifact plugin off the designer
-degrades to describing the prototype instead of failing.
+degrades to describing the prototype instead of failing. The designer names `update_artifact` in
+its allowlist so it can revise an existing prototype in place (read it with `get_artifact`, then
+make a targeted edit) — that's its one opt-in write tool: under protoAgent#4327, write tools are
+opt-in per subagent spec and never inherited. `rewrite_artifact` is not granted.
 
 It also reads the component APIs it composes (`ds_components`/`ds_component`) and checks the
 color pairs it introduces (`theme_contrast`). Its other cross-plugin tools are read-only
 context, each skipped when its plugin is off: `get_artifact`/`list_artifacts` (an existing
 prototype), `github_get_issue`/`github_read_file` (the issue and the consuming code), and
 `browser_open`/`browser_snapshot`/`browser_screenshot` (an existing live page; its own render is
-checked with `check_artifact`). It has no write, comment or merge tools. `tests/test_subagent_allowlists.py` pins every
+checked with `check_artifact`). Apart from `update_artifact`, it has no write tools, and it has no
+comment or merge tools. `tests/test_subagent_allowlists.py` pins every
 subagent's allowlist exactly.
 
 `task("ds-designer", …)` in chat, then `task("design-critic", …)` to review it.
