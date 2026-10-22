@@ -1606,6 +1606,8 @@ Read the context you were given, rather than working from a paraphrase:
 - `github_get_issue` — when you're designing for an issue, read it first.
 - `github_read_file` — the consuming repo's source, when the prototype must fit existing code.
 - `get_artifact` / `list_artifacts` — an existing prototype you're revising or building on.
+- To revise an existing prototype, read it with `get_artifact`, then make a targeted edit with
+  `update_artifact`. Don't re-create it with `show_artifact`.
 - `browser_open` + `browser_snapshot` — read the LIVE page you're designing into (its structure
   and real content). `browser_screenshot` saves a capture of that page and returns only its file
   path. The browser session is shared with the lead agent, so don't navigate away from a page
@@ -1644,12 +1646,14 @@ def _designer_tools() -> list:
 
 
 # Other plugins' tools the designer may use. `show_artifact` / `check_artifact` render and
-# verify its OWN prototype; everything else is READ-only context — the issue it designs for,
-# the consuming repo's source, an existing artifact, a live page. No write, comment or merge
-# tools: the designer produces a prototype, never a change to someone else's state.
+# verify its OWN prototype; `update_artifact` lets it revise an existing prototype in place —
+# its ONE opt-in write tool under the protoAgent#4327 rule (write tools are opt-in per subagent
+# spec, never inherited). Everything else is READ-only context — the issue it designs for,
+# the consuming repo's source, an existing artifact, a live page. No comment or merge tools.
 DESIGNER_EXTERNAL_TOOLS = (
     "show_artifact",
     "check_artifact",
+    "update_artifact",
     "get_artifact",
     "list_artifacts",
     "github_get_issue",
