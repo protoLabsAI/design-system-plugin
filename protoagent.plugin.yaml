@@ -1,6 +1,6 @@
 id: design-system
 name: Design System
-version: 0.15.1
+version: 0.16.0
 
 # The newest host seam this plugin depends on is the FRAME component (ADR 0118 D5:
 # register_component(frame=, reads=), the paired handshake and the host-mediated read channel,
